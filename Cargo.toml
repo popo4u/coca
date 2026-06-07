@@ -1,0 +1,27 @@
+[package]
+name = "coca"
+version = "0.1.0"
+edition = "2021"
+authors = ["one <furiedboy@gmail.com>"]
+description = "Unified terminal UI for browsing, inspecting, resuming, and forking local coder-agent sessions."
+readme = "README.md"
+keywords = ["tui", "codex", "claude", "cli", "sessions"]
+categories = ["command-line-utilities", "development-tools"]
+
+[workspace]
+members = [".", "xtask"]
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["clock"] }
+clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.29"
+dirs = "6.0"
+ratatui = "0.30.1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+walkdir = "2.5"
+
+[dev-dependencies]
+tempfile = "3.14"
