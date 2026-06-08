@@ -127,6 +127,17 @@ Each artifact in `dist/` is built for one platform and architecture. For example
 
 If Linux reports `cannot execute binary file: Exec format error`, the binary was built for a different operating system or CPU architecture. Build or download the matching target instead.
 
+## GitHub CI
+
+GitHub Actions runs `cargo xtask verify` on pull requests and pushes, then builds downloadable release artifacts for:
+
+- `coca-linux-x64.tar.gz`
+- `coca-windows-x64.zip`
+- `coca-macos-x64.tar.gz`
+- `coca-macos-arm64.tar.gz`
+
+Each archive contains a ready-to-run `coca` binary, or `coca.exe` on Windows, plus the README. Tag pushes also publish those archives as GitHub Release assets.
+
 ## Architecture Notes
 
 The crate is organized by responsibility:
