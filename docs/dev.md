@@ -77,7 +77,7 @@ Release build:
 cargo xtask build --release
 ```
 
-Build a release artifact and copy it to `dist/`:
+Build a release binary and copy it to `dist/`:
 
 ```sh
 cargo xtask dist
@@ -99,7 +99,7 @@ Print target aliases:
 cargo xtask targets
 ```
 
-Build default Linux, macOS, and Windows release targets:
+Build all known Linux, macOS, and Windows release binaries:
 
 ```sh
 cargo xtask dist-all
@@ -117,26 +117,26 @@ rustup target add x86_64-pc-windows-msvc
 
 ## Platform-Specific Binaries
 
-Each artifact in `dist/` is built for one platform and architecture. For example:
+Each binary in `dist/` is built for one platform and architecture. For example:
 
-- `coca-x86_64-apple-darwin` runs on Intel macOS.
-- `coca-aarch64-apple-darwin` runs on Apple Silicon macOS.
-- `coca-x86_64-unknown-linux-gnu` runs on x86_64 Linux.
-- `coca-aarch64-unknown-linux-gnu` runs on ARM64 Linux.
-- `coca-x86_64-pc-windows-msvc.exe` runs on x86_64 Windows.
+- `coca-macos-x64` runs on Intel macOS.
+- `coca-macos-arm64` runs on Apple Silicon macOS.
+- `coca-linux-x64` runs on x86_64 Linux.
+- `coca-linux-arm64` runs on ARM64 Linux.
+- `coca-windows-x64.exe` runs on x86_64 Windows.
 
 If Linux reports `cannot execute binary file: Exec format error`, the binary was built for a different operating system or CPU architecture. Build or download the matching target instead.
 
 ## GitHub CI
 
-GitHub Actions runs `cargo xtask verify` on pull requests and pushes, then builds downloadable release artifacts for:
+GitHub Actions runs `cargo xtask verify` on pull requests and pushes, then builds downloadable release binaries for:
 
-- `coca-linux-x64.tar.gz`
-- `coca-windows-x64.zip`
-- `coca-macos-x64.tar.gz`
-- `coca-macos-arm64.tar.gz`
+- `coca-linux-x64`
+- `coca-windows-x64.exe`
+- `coca-macos-x64`
+- `coca-macos-arm64`
 
-Each archive contains a ready-to-run `coca` binary, or `coca.exe` on Windows, plus the README. Tag pushes also publish those archives as GitHub Release assets.
+The current release flow intentionally publishes bare binaries only. It does not create archives, installers, checksums, signatures, or notarized artifacts. Tag pushes publish those binaries as GitHub Release assets.
 
 ## Architecture Notes
 
@@ -166,7 +166,7 @@ Before publishing a release or opening a pull request:
 cargo xtask verify
 ```
 
-Then build the platform artifact you need:
+Then build the platform binary you need:
 
 ```sh
 cargo xtask dist --target <target-alias-or-triple>

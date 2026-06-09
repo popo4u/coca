@@ -35,19 +35,24 @@ fn run() -> Result<(), String> {
             cargo(["clippy", "--all-targets", "--", "-D", "warnings"])?;
         }
         "build" => {
-            let options = BuildOptions::parse(args.collect())?;
+            let Some(options) = BuildOptions::parse(args.collect())? else {
+                return Ok(());
+            };
             build(&options)?;
         }
         "dist" => {
-            let options = BuildOptions::parse(args.collect())?.release();
+            let Some(options) = BuildOptions::parse(args.collect())? else {
+                return Ok(());
+            };
+            let options = options.release();
             build(&options)?;
             copy_dist(&options)?;
         }
         "dist-all" => {
-            for target in default_release_targets() {
+            for target in TARGETS {
                 let options = BuildOptions {
                     release: true,
-                    target: Some(target.to_string()),
+                    target: Some(BuildTarget::from_alias(target)),
                 };
                 build(&options)?;
                 copy_dist(&options)?;
@@ -63,11 +68,11 @@ fn run() -> Result<(), String> {
 #[derive(Debug, Default)]
 struct BuildOptions {
     release: bool,
-    target: Option<String>,
+    target: Option<BuildTarget>,
 }
 
 impl BuildOptions {
-    fn parse(args: Vec<String>) -> Result<Self, String> {
+    fn parse(args: Vec<String>) -> Result<Option<Self>, String> {
         let mut options = BuildOptions::default();
         let mut iter = args.into_iter();
         while let Some(arg) = iter.next() {
@@ -77,16 +82,16 @@ impl BuildOptions {
                     let Some(target) = iter.next() else {
                         return Err("--target requires a target triple".to_string());
                     };
-                    options.target = Some(expand_target_alias(&target).to_string());
+                    options.target = Some(BuildTarget::parse(&target));
                 }
                 "-h" | "--help" => {
                     print_help();
-                    return Ok(options);
+                    return Ok(None);
                 }
                 other => return Err(format!("unknown build option: {other}")),
             }
         }
-        Ok(options)
+        Ok(Some(options))
     }
 
     fn release(mut self) -> Self {
@@ -103,6 +108,66 @@ impl BuildOptions {
     }
 }
 
+#[derive(Debug)]
+struct BuildTarget {
+    triple: String,
+    dist_name: String,
+}
+
+impl BuildTarget {
+    fn parse(target: &str) -> Self {
+        if let Some(spec) = find_target_alias(target) {
+            return Self::from_alias(spec);
+        }
+
+        Self {
+            triple: target.to_string(),
+            dist_name: dist_name_for_target(target, target.contains("windows")),
+        }
+    }
+
+    fn from_alias(spec: &TargetSpec) -> Self {
+        Self {
+            triple: spec.triple.to_string(),
+            dist_name: dist_name_for_target(spec.alias, spec.windows),
+        }
+    }
+}
+
+struct TargetSpec {
+    alias: &'static str,
+    triple: &'static str,
+    windows: bool,
+}
+
+const TARGETS: &[TargetSpec] = &[
+    TargetSpec {
+        alias: "linux-x64",
+        triple: "x86_64-unknown-linux-gnu",
+        windows: false,
+    },
+    TargetSpec {
+        alias: "linux-arm64",
+        triple: "aarch64-unknown-linux-gnu",
+        windows: false,
+    },
+    TargetSpec {
+        alias: "macos-x64",
+        triple: "x86_64-apple-darwin",
+        windows: false,
+    },
+    TargetSpec {
+        alias: "macos-arm64",
+        triple: "aarch64-apple-darwin",
+        windows: false,
+    },
+    TargetSpec {
+        alias: "windows-x64",
+        triple: "x86_64-pc-windows-msvc",
+        windows: true,
+    },
+];
+
 fn build(options: &BuildOptions) -> Result<(), String> {
     let mut args = vec!["build"];
     if options.release {
@@ -110,17 +175,13 @@ fn build(options: &BuildOptions) -> Result<(), String> {
     }
     if let Some(target) = &options.target {
         args.push("--target");
-        args.push(target);
+        args.push(&target.triple);
     }
     cargo(args)
 }
 
 fn copy_dist(options: &BuildOptions) -> Result<(), String> {
-    let target = options
-        .target
-        .clone()
-        .unwrap_or_else(current_platform_label);
-    let exe_name = executable_name(&target);
+    let exe_name = executable_name(options.target.as_ref().map(|target| target.triple.as_str()));
     let source = artifact_path(options, &exe_name);
     if !source.exists() {
         return Err(format!(
@@ -132,11 +193,7 @@ fn copy_dist(options: &BuildOptions) -> Result<(), String> {
     let dist_dir = PathBuf::from("dist");
     fs::create_dir_all(&dist_dir).map_err(|err| format!("create dist directory: {err}"))?;
 
-    let output_name = if exe_name.ends_with(".exe") {
-        format!("{APP_NAME}-{target}.exe")
-    } else {
-        format!("{APP_NAME}-{target}")
-    };
+    let output_name = dist_output_name(options);
     let output = dist_dir.join(output_name);
     fs::copy(&source, &output).map_err(|err| {
         format!(
@@ -153,7 +210,7 @@ fn copy_dist(options: &BuildOptions) -> Result<(), String> {
 fn artifact_path(options: &BuildOptions, exe_name: &str) -> PathBuf {
     match &options.target {
         Some(target) => Path::new("target")
-            .join(target)
+            .join(&target.triple)
             .join(options.profile_dir())
             .join(exe_name),
         None => Path::new("target")
@@ -162,11 +219,29 @@ fn artifact_path(options: &BuildOptions, exe_name: &str) -> PathBuf {
     }
 }
 
-fn executable_name(target: &str) -> String {
-    if target.contains("windows") {
+fn executable_name(target: Option<&str>) -> String {
+    if target.map_or(env::consts::OS == "windows", |target| {
+        target.contains("windows")
+    }) {
         format!("{APP_NAME}.exe")
     } else {
         APP_NAME.to_string()
+    }
+}
+
+fn dist_output_name(options: &BuildOptions) -> String {
+    if let Some(target) = &options.target {
+        return target.dist_name.clone();
+    }
+
+    dist_name_for_target(&current_platform_label(), env::consts::OS == "windows")
+}
+
+fn dist_name_for_target(label: &str, windows: bool) -> String {
+    if windows {
+        format!("{APP_NAME}-{label}.exe")
+    } else {
+        format!("{APP_NAME}-{label}")
     }
 }
 
@@ -194,25 +269,8 @@ where
     }
 }
 
-fn expand_target_alias(target: &str) -> &str {
-    match target {
-        "linux-x64" => "x86_64-unknown-linux-gnu",
-        "linux-arm64" => "aarch64-unknown-linux-gnu",
-        "macos-x64" => "x86_64-apple-darwin",
-        "macos-arm64" => "aarch64-apple-darwin",
-        "windows-x64" => "x86_64-pc-windows-msvc",
-        _ => target,
-    }
-}
-
-fn default_release_targets() -> &'static [&'static str] {
-    &[
-        "x86_64-unknown-linux-gnu",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-apple-darwin",
-        "aarch64-apple-darwin",
-        "x86_64-pc-windows-msvc",
-    ]
+fn find_target_alias(alias: &str) -> Option<&'static TargetSpec> {
+    TARGETS.iter().find(|target| target.alias == alias)
 }
 
 fn current_platform_label() -> String {
@@ -221,11 +279,13 @@ fn current_platform_label() -> String {
 
 fn print_targets() {
     println!("aliases:");
-    println!("  linux-x64    -> x86_64-unknown-linux-gnu");
-    println!("  linux-arm64  -> aarch64-unknown-linux-gnu");
-    println!("  macos-x64    -> x86_64-apple-darwin");
-    println!("  macos-arm64  -> aarch64-apple-darwin");
-    println!("  windows-x64  -> x86_64-pc-windows-msvc");
+    for target in TARGETS {
+        let dist_name = dist_name_for_target(target.alias, target.windows);
+        println!(
+            "  {:13} -> {:27} dist/{}",
+            target.alias, target.triple, dist_name
+        );
+    }
 }
 
 fn print_help() {
@@ -241,9 +301,9 @@ Commands:
   verify                      Run fmt --check, test, and clippy
   build [--release] [--target TARGET]
                               Build the app
-  dist [--target TARGET]      Build release artifact and copy it to dist/
-  dist-all                    Build dist artifacts for default macOS/Linux/Windows targets
-  targets                     Print target aliases
+  dist [--target TARGET]      Build release binary and copy it to dist/
+  dist-all                    Build dist binaries for known macOS/Linux/Windows targets
+  targets                     Print target aliases and dist output names
 
 Target aliases:
   linux-x64, linux-arm64, macos-x64, macos-arm64, windows-x64

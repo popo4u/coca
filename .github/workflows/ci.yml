@@ -26,7 +26,7 @@ jobs:
         run: cargo xtask verify
 
   build:
-    name: Build ${{ matrix.package }}
+    name: Build ${{ matrix.target }}
     needs: verify
     strategy:
       fail-fast: false
@@ -35,27 +35,15 @@ jobs:
           - os: ubuntu-latest
             target: linux-x64
             target_triple: x86_64-unknown-linux-gnu
-            dist_name: coca-x86_64-unknown-linux-gnu
-            package: coca-linux-x64
-            archive: coca-linux-x64.tar.gz
           - os: windows-latest
             target: windows-x64
             target_triple: x86_64-pc-windows-msvc
-            dist_name: coca-x86_64-pc-windows-msvc.exe
-            package: coca-windows-x64
-            archive: coca-windows-x64.zip
           - os: macos-13
             target: macos-x64
             target_triple: x86_64-apple-darwin
-            dist_name: coca-x86_64-apple-darwin
-            package: coca-macos-x64
-            archive: coca-macos-x64.tar.gz
           - os: macos-14
             target: macos-arm64
             target_triple: aarch64-apple-darwin
-            dist_name: coca-aarch64-apple-darwin
-            package: coca-macos-arm64
-            archive: coca-macos-arm64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -69,32 +57,14 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Build release artifact
+      - name: Build release binary
         run: cargo xtask dist --target ${{ matrix.target }}
-
-      - name: Package Unix artifact
-        if: runner.os != 'Windows'
-        run: |
-          mkdir -p package
-          cp "dist/${{ matrix.dist_name }}" package/coca
-          chmod +x package/coca
-          cp README.md package/README.md
-          tar -C package -czf "${{ matrix.archive }}" .
-
-      - name: Package Windows artifact
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force package | Out-Null
-          Copy-Item "dist/${{ matrix.dist_name }}" package/coca.exe
-          Copy-Item README.md package/README.md
-          Compress-Archive -Path package/* -DestinationPath "${{ matrix.archive }}" -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.package }}
-          path: ${{ matrix.archive }}
+          name: coca-${{ matrix.target }}
+          path: dist/*
           if-no-files-found: error
 
   release:
@@ -114,5 +84,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/**/*.tar.gz
-            artifacts/**/*.zip
+            artifacts/*/coca-*
