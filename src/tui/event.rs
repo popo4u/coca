@@ -18,11 +18,9 @@ impl App {
                     self.query.pop();
                     self.apply_filter();
                 }
-                KeyCode::Char(ch) => {
-                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                        self.query.push(ch);
-                        self.apply_filter();
-                    }
+                KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.query.push(ch);
+                    self.apply_filter();
                 }
                 _ => {}
             }
