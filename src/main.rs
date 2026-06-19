@@ -4,6 +4,7 @@ mod model;
 mod process;
 mod providers;
 mod remote;
+mod settings;
 mod tui;
 
 use anyhow::Result;
@@ -11,7 +12,8 @@ use anyhow::Result;
 use crate::cli::{Cli, ClientCommand, Command};
 use crate::process::exec_resume;
 use crate::providers::{load_sessions, sort_sessions};
-use crate::remote::{load_remote_config_for_cli, load_remote_sessions, serve, ServeOptions};
+use crate::remote::{load_remote_sessions, serve, ServeOptions};
+use crate::settings::load_settings_for_cli;
 use crate::tui::run_tui;
 
 fn main() -> Result<()> {
@@ -39,12 +41,13 @@ fn main() -> Result<()> {
         claude_home.as_deref(),
         provider_filter,
     )?;
-    let remote_config = load_remote_config_for_cli(cli.remote_config().as_deref())?;
+    let (settings, settings_path) = load_settings_for_cli(cli.remote_config().as_deref())?;
+    let remote_config = settings.remote_config();
     let (mut remote_sessions, warnings) = load_remote_sessions(&remote_config);
     sessions.append(&mut remote_sessions);
     sort_sessions(&mut sessions);
 
-    if let Some(target) = run_tui(sessions, provider_filter, warnings)? {
+    if let Some(target) = run_tui(sessions, provider_filter, warnings, settings, settings_path)? {
         exec_resume(target)?;
     }
 

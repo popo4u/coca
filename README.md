@@ -48,6 +48,33 @@ coca --codex-home ~/.codex --claude-home ~/.claude
 coca --remote-config ~/.config/coca/remotes.json
 ```
 
+By default `coca` reads and writes settings at `~/.config/coca/settings.json`:
+
+```json
+{
+  "remotes": [
+    {
+      "name": "work-mac",
+      "addr": "192.168.1.20:8765",
+      "token": "<secret>",
+      "enabled": true
+    }
+  ],
+  "origin_visibility": {
+    "local": true,
+    "remotes": {
+      "work-mac": true
+    }
+  },
+  "launch_defaults": {
+    "resume": { "use_current_dir": false, "yolo": false },
+    "fork": { "use_current_dir": false, "yolo": false }
+  }
+}
+```
+
+Press `,` in the TUI to toggle visible origins and the default launch options used by `s` execute and `f` fork dialogs. If `settings.json` does not exist, `coca` will still read an existing `~/.config/coca/remotes.json` for compatibility.
+
 ## Remote Clients
 
 Run a read-only RPC server on a machine that has Codex or Claude history:
@@ -56,12 +83,12 @@ Run a read-only RPC server on a machine that has Codex or Claude history:
 coca client serve --bind 0.0.0.0:8765 --token <secret>
 ```
 
-Configure the browsing machine with `~/.config/coca/remotes.json`:
+Configure the browsing machine with `~/.config/coca/settings.json`:
 
 ```json
 {
   "remotes": [
-    { "name": "work-mac", "addr": "192.168.1.20:8765", "token": "<secret>" }
+    { "name": "work-mac", "addr": "192.168.1.20:8765", "token": "<secret>", "enabled": true }
   ]
 }
 ```
@@ -75,6 +102,8 @@ Remote sessions support listing, search, details, and transcript viewing. Resume
 | `Up` / `Down`, `j` / `k` | Move selection |
 | `/` | Search sessions |
 | `Tab` | Cycle provider filter |
+| `,` | Open settings |
+| `?` | Open help |
 | `Space` | Expand or collapse session details |
 | `t` | Open transcript viewer |
 | `h` / `l` | Page transcript backward or forward |

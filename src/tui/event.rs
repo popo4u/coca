@@ -1,8 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::launch::{build_launch_target, default_resume_target, launch_options, LaunchMode};
+use crate::settings::save_settings;
 
-use super::app::{session_key, Action, App, LaunchDialog};
+use super::app::{session_key, Action, App, ConfigItem, ConfigPage, HelpPage, LaunchDialog};
 
 impl App {
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
@@ -27,6 +28,10 @@ impl App {
             return None;
         }
 
+        if self.help_page.is_some() {
+            return self.handle_help_key(key);
+        }
+
         if self.transcript_session.is_some() {
             match key.code {
                 KeyCode::Esc => {
@@ -44,6 +49,10 @@ impl App {
             return None;
         }
 
+        if self.config_page.is_some() {
+            return self.handle_config_key(key);
+        }
+
         if self.launch_dialog.is_some() {
             return self.handle_launch_dialog_key(key);
         }
@@ -52,6 +61,15 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
             KeyCode::Char('/') => {
                 self.search_mode = true;
+                None
+            }
+            KeyCode::Char(',') => {
+                self.config_page = Some(ConfigPage::default());
+                self.clamp_config_selection();
+                None
+            }
+            KeyCode::Char('?') => {
+                self.help_page = Some(HelpPage);
                 None
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -165,6 +183,44 @@ impl App {
         }
     }
 
+    fn handle_config_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char(',') => {
+                self.config_page = None;
+                None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(config_page) = &mut self.config_page {
+                    config_page.selected_item = config_page.selected_item.saturating_sub(1);
+                }
+                None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let item_count = self.config_items().len();
+                if let Some(config_page) = &mut self.config_page {
+                    config_page.selected_item =
+                        (config_page.selected_item + 1).min(item_count.saturating_sub(1));
+                }
+                None
+            }
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                self.toggle_selected_config_item();
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_help_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('?') => {
+                self.help_page = None;
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn open_launch_dialog(&mut self, mode: LaunchMode) {
         let Some(session) = self.selected_session() else {
             return;
@@ -180,8 +236,91 @@ impl App {
             session: session_key(session),
             mode,
             selected_option: 0,
-            options: launch_options(session, &self.current_cwd),
+            options: self.launch_options_with_defaults(session, mode),
         });
+    }
+
+    fn launch_options_with_defaults(
+        &self,
+        session: &crate::model::Session,
+        mode: LaunchMode,
+    ) -> Vec<crate::launch::LaunchOption> {
+        let mut options = launch_options(session, &self.current_cwd);
+        for option in &mut options {
+            option.enabled = self.settings.launch_default(mode, option.kind);
+        }
+        options
+    }
+
+    fn toggle_selected_config_item(&mut self) {
+        let Some(selected_item) = self
+            .config_page
+            .as_ref()
+            .map(|config_page| config_page.selected_item)
+        else {
+            return;
+        };
+        let Some(item) = self.config_items().get(selected_item).cloned() else {
+            return;
+        };
+
+        match item {
+            ConfigItem::OriginLocal => {
+                self.settings.origin_visibility.local = !self.settings.origin_visibility.local;
+                self.apply_filter();
+            }
+            ConfigItem::OriginRemote(name) => {
+                let enabled = !self.settings.remote_enabled(&name);
+                self.settings.set_remote_enabled(&name, enabled);
+                self.apply_filter();
+                if enabled && !self.has_remote_sessions(&name) {
+                    self.status_message = Some(format!(
+                        "Settings saved. Restart coca to load remote {name}."
+                    ));
+                }
+            }
+            ConfigItem::LaunchDefault { mode, kind } => {
+                let enabled = !self.settings.launch_default(mode, kind);
+                self.settings.set_launch_default(mode, kind, enabled);
+            }
+        }
+
+        self.clamp_config_selection();
+        self.save_settings_from_tui();
+    }
+
+    fn has_remote_sessions(&self, name: &str) -> bool {
+        self.sessions.iter().any(|session| {
+            matches!(
+                &session.origin,
+                crate::model::SessionOrigin::Remote(remote_name) if remote_name == name
+            )
+        })
+    }
+
+    fn save_settings_from_tui(&mut self) {
+        let Some(path) = self.settings_path.clone() else {
+            self.status_message = Some("Settings updated for this run only.".to_string());
+            return;
+        };
+
+        match save_settings(&path, &self.settings) {
+            Ok(()) => {
+                if self.status_message.is_none()
+                    || !self
+                        .status_message
+                        .as_deref()
+                        .unwrap_or_default()
+                        .starts_with("Settings saved. Restart")
+                {
+                    self.status_message =
+                        Some(format!("Settings saved to {}", path.to_string_lossy()));
+                }
+            }
+            Err(err) => {
+                self.status_message = Some(format!("Failed to save settings: {err:#}"));
+            }
+        }
     }
 
     fn toggle_detail(&mut self) {

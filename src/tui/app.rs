@@ -12,13 +12,16 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
-use crate::launch::{LaunchMode, LaunchOption, ResumeTarget};
+use crate::launch::{LaunchMode, LaunchOption, LaunchOptionKind, ResumeTarget};
 use crate::model::{ProviderFilter, ProviderKind, Session, SessionOrigin};
+use crate::settings::Settings;
 
 pub fn run_tui(
     sessions: Vec<Session>,
     initial_filter: ProviderFilter,
     warnings: Vec<String>,
+    settings: Settings,
+    settings_path: PathBuf,
 ) -> Result<Option<ResumeTarget>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -27,7 +30,14 @@ pub fn run_tui(
     let mut terminal = Terminal::new(backend)?;
 
     let mut guard = TerminalGuard { restored: false };
-    let result = run_loop(&mut terminal, sessions, initial_filter, warnings);
+    let result = run_loop(
+        &mut terminal,
+        sessions,
+        initial_filter,
+        warnings,
+        settings,
+        settings_path,
+    );
     guard.restore()?;
     result
 }
@@ -63,8 +73,16 @@ fn run_loop(
     sessions: Vec<Session>,
     initial_filter: ProviderFilter,
     warnings: Vec<String>,
+    settings: Settings,
+    settings_path: PathBuf,
 ) -> Result<Option<ResumeTarget>> {
-    let mut app = App::new_with_warnings(sessions, initial_filter, warnings);
+    let mut app = App::new_with_settings(
+        sessions,
+        initial_filter,
+        warnings,
+        settings,
+        Some(settings_path),
+    );
     loop {
         terminal.draw(|frame| app.render(frame))?;
         if !event::poll(Duration::from_millis(150))? {
@@ -99,8 +117,12 @@ pub(super) struct App {
     pub(super) transcript_session: Option<SessionKey>,
     pub(super) transcript_scroll: u16,
     pub(super) launch_dialog: Option<LaunchDialog>,
+    pub(super) config_page: Option<ConfigPage>,
+    pub(super) help_page: Option<HelpPage>,
     pub(super) current_cwd: PathBuf,
     pub(super) status_message: Option<String>,
+    pub(super) settings: Settings,
+    pub(super) settings_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -118,11 +140,46 @@ pub(super) struct LaunchDialog {
     pub(super) options: Vec<LaunchOption>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct ConfigPage {
+    pub(super) selected_item: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct HelpPage;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum ConfigItem {
+    OriginLocal,
+    OriginRemote(String),
+    LaunchDefault {
+        mode: LaunchMode,
+        kind: LaunchOptionKind,
+    },
+}
+
 impl App {
+    #[cfg(test)]
     pub(super) fn new_with_warnings(
         sessions: Vec<Session>,
         provider_filter: ProviderFilter,
         warnings: Vec<String>,
+    ) -> Self {
+        Self::new_with_settings(
+            sessions,
+            provider_filter,
+            warnings,
+            Settings::default(),
+            None,
+        )
+    }
+
+    pub(super) fn new_with_settings(
+        sessions: Vec<Session>,
+        provider_filter: ProviderFilter,
+        warnings: Vec<String>,
+        settings: Settings,
+        settings_path: Option<PathBuf>,
     ) -> Self {
         let mut app = Self {
             sessions,
@@ -135,12 +192,16 @@ impl App {
             transcript_session: None,
             transcript_scroll: 0,
             launch_dialog: None,
+            config_page: None,
+            help_page: None,
             current_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             status_message: if warnings.is_empty() {
                 None
             } else {
                 Some(format!("Remote load warnings: {}", warnings.join("; ")))
             },
+            settings,
+            settings_path,
         };
         app.apply_filter();
         app
@@ -153,6 +214,7 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, session)| self.provider_filter.includes(session.provider))
+            .filter(|(_, session)| self.settings.origin_visible(&session.origin))
             .filter(|(_, session)| query.is_empty() || session.searchable_text().contains(&query))
             .map(|(idx, _)| idx)
             .collect();
@@ -187,6 +249,13 @@ impl App {
         self.selected_session().map(session_key)
     }
 
+    pub(super) fn visible_session_count(&self) -> usize {
+        self.sessions
+            .iter()
+            .filter(|session| self.settings.origin_visible(&session.origin))
+            .count()
+    }
+
     pub(super) fn session_by_key(&self, key: &SessionKey) -> Option<&Session> {
         self.sessions.iter().find(|session| {
             session.origin == key.origin && session.provider == key.provider && session.id == key.id
@@ -205,6 +274,47 @@ impl App {
                 .unwrap_or(false)
         })
     }
+
+    pub(super) fn config_items(&self) -> Vec<ConfigItem> {
+        let mut remote_names = std::collections::BTreeSet::new();
+        for remote in &self.settings.remotes {
+            remote_names.insert(remote.name.clone());
+        }
+        for session in &self.sessions {
+            if let SessionOrigin::Remote(name) = &session.origin {
+                remote_names.insert(name.clone());
+            }
+        }
+
+        let mut items = vec![ConfigItem::OriginLocal];
+        items.extend(remote_names.into_iter().map(ConfigItem::OriginRemote));
+        items.extend([
+            ConfigItem::LaunchDefault {
+                mode: LaunchMode::Resume,
+                kind: LaunchOptionKind::UseCurrentDir,
+            },
+            ConfigItem::LaunchDefault {
+                mode: LaunchMode::Resume,
+                kind: LaunchOptionKind::Yolo,
+            },
+            ConfigItem::LaunchDefault {
+                mode: LaunchMode::Fork,
+                kind: LaunchOptionKind::UseCurrentDir,
+            },
+            ConfigItem::LaunchDefault {
+                mode: LaunchMode::Fork,
+                kind: LaunchOptionKind::Yolo,
+            },
+        ]);
+        items
+    }
+
+    pub(super) fn clamp_config_selection(&mut self) {
+        let item_count = self.config_items().len();
+        if let Some(config_page) = &mut self.config_page {
+            config_page.selected_item = config_page.selected_item.min(item_count.saturating_sub(1));
+        }
+    }
 }
 
 pub(super) fn session_key(session: &Session) -> SessionKey {
@@ -220,7 +330,9 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent};
 
+    use crate::launch::LaunchOptionKind;
     use crate::model::ChatMessage;
+    use crate::settings::Settings;
 
     #[test]
     fn filters_sessions_by_provider_and_query() {
@@ -459,6 +571,128 @@ mod tests {
             app.status_message.as_deref(),
             Some("Remote sessions are browse-only in this version: work-mac")
         );
+    }
+
+    #[test]
+    fn settings_hide_remote_origins_from_filter() {
+        let mut remote = session(ProviderKind::Codex, "sid", "hello codex");
+        remote.origin = SessionOrigin::Remote("work-mac".to_string());
+        let mut settings = Settings::default();
+        settings.set_remote_enabled("work-mac", false);
+
+        let app = App::new_with_settings(
+            vec![remote],
+            ProviderFilter::All,
+            Vec::new(),
+            settings,
+            None,
+        );
+
+        assert!(app.filtered_indices.is_empty());
+    }
+
+    #[test]
+    fn visible_session_count_tracks_origin_visibility() {
+        let local = session(ProviderKind::Codex, "local", "hello local");
+        let mut remote = session(ProviderKind::Claude, "remote", "hello remote");
+        remote.origin = SessionOrigin::Remote("work-mac".to_string());
+        let mut settings = Settings::default();
+        settings.set_remote_enabled("work-mac", false);
+
+        let app = App::new_with_settings(
+            vec![local, remote],
+            ProviderFilter::All,
+            Vec::new(),
+            settings,
+            None,
+        );
+
+        assert_eq!(app.filtered_indices.len(), 1);
+        assert_eq!(app.visible_session_count(), 1);
+    }
+
+    #[test]
+    fn comma_opens_config_page_and_toggles_origin_visibility() {
+        let mut app = App::new_with_warnings(
+            vec![session(ProviderKind::Claude, "sid", "hello claude")],
+            ProviderFilter::All,
+            Vec::new(),
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(',')));
+        assert!(app.config_page.is_some());
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        assert!(!app.settings.origin_visibility.local);
+        assert!(app.filtered_indices.is_empty());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Settings updated for this run only.")
+        );
+    }
+
+    #[test]
+    fn config_page_toggles_launch_defaults_used_by_s_dialog() {
+        let mut app = App::new_with_warnings(
+            vec![session(ProviderKind::Codex, "sid", "hello codex")],
+            ProviderFilter::All,
+            Vec::new(),
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(',')));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+
+        assert!(app
+            .settings
+            .launch_default(LaunchMode::Resume, LaunchOptionKind::Yolo));
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+        let dialog = app.launch_dialog.as_ref().unwrap();
+        assert!(dialog
+            .options
+            .iter()
+            .any(|option| option.kind == LaunchOptionKind::Yolo && option.enabled));
+    }
+
+    #[test]
+    fn launch_dialog_uses_configured_f_defaults() {
+        let mut settings = Settings::default();
+        settings.set_launch_default(LaunchMode::Fork, LaunchOptionKind::UseCurrentDir, true);
+        let mut app = App::new_with_settings(
+            vec![session(ProviderKind::Claude, "sid", "hello claude")],
+            ProviderFilter::All,
+            Vec::new(),
+            settings,
+            None,
+        );
+        app.current_cwd = PathBuf::from("/current");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        let dialog = app.launch_dialog.as_ref().unwrap();
+
+        assert!(dialog
+            .options
+            .iter()
+            .any(|option| { option.kind == LaunchOptionKind::UseCurrentDir && option.enabled }));
+    }
+
+    #[test]
+    fn question_mark_opens_help_page_and_escape_closes() {
+        let mut app = App::new_with_warnings(
+            vec![session(ProviderKind::Codex, "sid", "hello codex")],
+            ProviderFilter::All,
+            Vec::new(),
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('?')));
+        assert_eq!(app.help_page, Some(HelpPage));
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.help_page.is_none());
     }
 
     fn session(provider: ProviderKind, id: &str, title: &str) -> Session {

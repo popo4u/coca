@@ -6,10 +6,11 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::model::Session;
+use crate::launch::{LaunchMode, LaunchOptionKind};
+use crate::model::{Session, SessionOrigin};
 use crate::tui::formatting::{short_id, short_path};
 
-use super::app::{App, LaunchDialog};
+use super::app::{App, ConfigItem, ConfigPage, HelpPage, LaunchDialog};
 use super::views::{
     centered_rect, centered_rect_fixed_height, launch_dialog_height, session_lines, transcript_text,
 };
@@ -41,6 +42,12 @@ impl App {
                 self.render_launch_dialog(frame, dialog, session);
             }
         }
+        if let Some(config_page) = &self.config_page {
+            self.render_config_page(frame, config_page);
+        }
+        if let Some(help_page) = &self.help_page {
+            self.render_help_page(frame, help_page);
+        }
     }
 
     fn render_header(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -48,7 +55,7 @@ impl App {
             " coca  provider:{}  sessions:{}/{} ",
             self.provider_filter.label(),
             self.filtered_indices.len(),
-            self.sessions.len()
+            self.visible_session_count()
         );
         let query = if self.query.is_empty() {
             "search:".to_string()
@@ -143,19 +150,23 @@ impl App {
     }
 
     fn render_footer(&self, frame: &mut Frame<'_>, area: Rect) {
-        let help = if let Some(message) = &self.status_message {
+        let help = if self.help_page.is_some() {
+            "?/Esc close help"
+        } else if let Some(message) = &self.status_message {
             message.as_str()
         } else if self.transcript_session.is_some() {
             "h/l page transcript  Esc close"
         } else if self.launch_dialog.is_some() {
             "↑/↓ option  Space toggle  Enter launch  Esc cancel"
+        } else if self.config_page.is_some() {
+            "↑/↓ setting  Space/Enter toggle  Esc close"
         } else if self.search_mode {
             "type search  Enter accept  Esc close"
         } else {
-            "↑/↓ move  / search  Tab provider  Space detail  t transcript  s execute  f fork  Enter resume  q quit"
+            "↑/↓ move  / search  Tab provider  , config  ? help  Space detail  t transcript  s execute  f fork  Enter resume  q quit"
         };
         let footer = Paragraph::new(help)
-            .fg(Color::Gray)
+            .fg(Color::LightMagenta)
             .block(Block::default().borders(Borders::TOP));
         frame.render_widget(footer, area);
     }
@@ -239,4 +250,147 @@ impl App {
             .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, area);
     }
+
+    fn render_help_page(&self, frame: &mut Frame<'_>, _help_page: &HelpPage) {
+        let area = centered_rect_fixed_height(78, 24, frame.area());
+        frame.render_widget(Clear, area);
+
+        let lines = vec![
+            section("Navigation"),
+            item("Up/Down, j/k", "Move selection"),
+            item("PageUp/PageDown", "Move by page"),
+            item("g / G", "Jump to first or last visible session"),
+            item("Tab", "Cycle provider filter"),
+            item("/", "Search sessions"),
+            item("?", "Open or close this help"),
+            Line::raw(""),
+            section("Session"),
+            item("Space", "Expand or collapse details"),
+            item("t", "Open transcript"),
+            item("h/l, Left/Right, PageUp/PageDown", "Page transcript"),
+            item("Enter", "Resume selected local session"),
+            item("s", "Execute selected local session with options"),
+            item("f", "Fork selected local session with options"),
+            Line::raw(""),
+            section("Settings and Dialogs"),
+            item(",", "Open settings"),
+            item("Space/Enter", "Toggle selected setting or launch option"),
+            item("Esc", "Close modal or quit from the main list"),
+            item("q, Ctrl-C", "Quit from the main list"),
+        ];
+
+        let paragraph = Paragraph::new(Text::from(lines))
+            .block(Block::default().title(" Help ").borders(Borders::ALL))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
+    }
+
+    fn render_config_page(&self, frame: &mut Frame<'_>, config_page: &ConfigPage) {
+        let items = self.config_items();
+        let height = (items.len() as u16 + 8).clamp(12, 24);
+        let area = centered_rect_fixed_height(76, height, frame.area());
+        frame.render_widget(Clear, area);
+
+        let mut lines = vec![
+            Line::styled(
+                "Origins",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::raw(""),
+        ];
+
+        let mut defaults_header_added = false;
+        for (idx, item) in items.iter().enumerate() {
+            if matches!(item, ConfigItem::LaunchDefault { .. }) && !defaults_header_added {
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    "Launch defaults",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                lines.push(Line::raw(""));
+                defaults_header_added = true;
+            }
+
+            let selected = idx == config_page.selected_item;
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let marker = if selected { "› " } else { "  " };
+            let checkbox = if self.config_item_enabled(item) {
+                "[x] "
+            } else {
+                "[ ] "
+            };
+            lines.push(Line::from(vec![
+                Span::styled(marker, style),
+                Span::styled(checkbox, style),
+                Span::styled(self.config_item_label(item), style),
+            ]));
+        }
+
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "Remote changes are saved; newly enabled remotes load on next start.",
+            Style::default().fg(Color::DarkGray),
+        ));
+
+        let paragraph = Paragraph::new(Text::from(lines))
+            .block(Block::default().title(" Settings ").borders(Borders::ALL))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
+    }
+
+    fn config_item_enabled(&self, item: &ConfigItem) -> bool {
+        match item {
+            ConfigItem::OriginLocal => self.settings.origin_visible(&SessionOrigin::Local),
+            ConfigItem::OriginRemote(name) => self.settings.remote_enabled(name),
+            ConfigItem::LaunchDefault { mode, kind } => self.settings.launch_default(*mode, *kind),
+        }
+    }
+
+    fn config_item_label(&self, item: &ConfigItem) -> String {
+        match item {
+            ConfigItem::OriginLocal => "origin local".to_string(),
+            ConfigItem::OriginRemote(name) => format!("origin {name}"),
+            ConfigItem::LaunchDefault { mode, kind } => {
+                let key = match mode {
+                    LaunchMode::Resume => "s execute",
+                    LaunchMode::Fork => "f fork",
+                };
+                let option = match kind {
+                    LaunchOptionKind::UseCurrentDir => "use current directory",
+                    LaunchOptionKind::Yolo => "dangerous permissions bypass",
+                };
+                format!("{key}: {option}")
+            }
+        }
+    }
+}
+
+fn section(label: &'static str) -> Line<'static> {
+    Line::styled(
+        label,
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn item(key: &'static str, description: &'static str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("{key:<34}"),
+            Style::default().fg(Color::LightMagenta),
+        ),
+        Span::raw(description),
+    ])
 }

@@ -27,12 +27,6 @@ pub struct RemoteConfig {
 }
 
 impl RemoteConfig {
-    pub fn empty() -> Self {
-        Self {
-            remotes: Vec::new(),
-        }
-    }
-
     fn validate(&self) -> Result<()> {
         let mut names = HashSet::new();
         for remote in &self.remotes {
@@ -104,25 +98,6 @@ struct RpcContext<'a> {
     codex_home: Option<&'a Path>,
     claude_home: Option<&'a Path>,
     provider_filter: ProviderFilter,
-}
-
-pub fn default_remote_config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".config").join("coca").join("remotes.json"))
-}
-
-pub fn load_remote_config_for_cli(path: Option<&Path>) -> Result<RemoteConfig> {
-    if let Some(path) = path {
-        return load_remote_config(path);
-    }
-
-    let Some(path) = default_remote_config_path() else {
-        return Ok(RemoteConfig::empty());
-    };
-    if path.exists() {
-        load_remote_config(&path)
-    } else {
-        Ok(RemoteConfig::empty())
-    }
 }
 
 pub fn load_remote_config(path: &Path) -> Result<RemoteConfig> {

@@ -38,6 +38,14 @@ Use a remote config:
 cargo run -- --remote-config ~/.config/coca/remotes.json
 ```
 
+The default persistent settings file is:
+
+```sh
+~/.config/coca/settings.json
+```
+
+It stores configured remotes, origin visibility, and the default launch options used by the `s` execute and `f` fork dialogs. The TUI settings page is opened with `,`. `--remote-config` remains available as a remotes-only override, and an existing `~/.config/coca/remotes.json` is still read when `settings.json` does not exist.
+
 Run a read-only JSON-RPC/TCP client server:
 
 ```sh
