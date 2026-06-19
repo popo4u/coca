@@ -1,7 +1,9 @@
 use std::fmt;
 use std::path::PathBuf;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ProviderKind {
     Codex,
     Claude,
@@ -50,15 +52,41 @@ impl ProviderFilter {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum SessionOrigin {
+    Local,
+    Remote(String),
+}
+
+impl SessionOrigin {
+    pub fn label(&self) -> &str {
+        match self {
+            SessionOrigin::Local => "local",
+            SessionOrigin::Remote(name) => name,
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        matches!(self, SessionOrigin::Local)
+    }
+}
+
+impl fmt::Display for SessionOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.label())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChatMessage {
     pub role: String,
     pub text: String,
     pub timestamp_ms: Option<i64>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Session {
+    pub origin: SessionOrigin,
     pub provider: ProviderKind,
     pub id: String,
     pub title: String,
@@ -76,6 +104,7 @@ pub struct Session {
 impl Session {
     pub fn searchable_text(&self) -> String {
         let mut parts = vec![
+            self.origin.to_string(),
             self.provider.to_string(),
             self.id.clone(),
             self.title.clone(),
@@ -92,6 +121,10 @@ impl Session {
             parts.push(message.text.clone());
         }
         parts.join("\n").to_lowercase()
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.origin.is_local()
     }
 }
 
@@ -117,6 +150,27 @@ mod tests {
         assert_eq!(ProviderFilter::All.next(), ProviderFilter::Codex);
         assert_eq!(ProviderFilter::Codex.next(), ProviderFilter::Claude);
         assert_eq!(ProviderFilter::Claude.next(), ProviderFilter::All);
+    }
+
+    #[test]
+    fn searchable_text_includes_origin() {
+        let session = Session {
+            origin: SessionOrigin::Remote("work-mac".to_string()),
+            provider: ProviderKind::Codex,
+            id: "sid".to_string(),
+            title: "title".to_string(),
+            cwd: "/tmp".to_string(),
+            created_at_ms: None,
+            updated_at_ms: None,
+            model: None,
+            source_path: "/tmp/session".into(),
+            first_user_message: None,
+            transcript: Vec::new(),
+            resume_program: "codex".to_string(),
+            resume_args: vec!["resume".to_string(), "sid".to_string()],
+        };
+
+        assert!(session.searchable_text().contains("work-mac"));
     }
 
     #[test]

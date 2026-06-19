@@ -6,7 +6,7 @@ use anyhow::Result;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
-use crate::model::{truncate_for_title, ChatMessage, ProviderKind, Session};
+use crate::model::{truncate_for_title, ChatMessage, ProviderKind, Session, SessionOrigin};
 
 pub fn load_codex_sessions(codex_home: &Path) -> Result<Vec<Session>> {
     let db_path = codex_home.join("state_5.sqlite");
@@ -87,6 +87,7 @@ pub fn load_codex_sessions(codex_home: &Path) -> Result<Vec<Session>> {
         };
 
         sessions.push(Session {
+            origin: SessionOrigin::Local,
             provider: ProviderKind::Codex,
             id: id.clone(),
             title: display_title,

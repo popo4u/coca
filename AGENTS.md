@@ -2,20 +2,35 @@
 
 Guidance for agents working in this repository.
 
-## Project Shape
+## Start Here
 
-`coca` is a Rust terminal UI for browsing and launching local coder-agent sessions. It supports Codex and Claude today and should stay easy to extend to new providers.
+`coca` is a Rust terminal UI for browsing, inspecting, resuming, and forking local coder-agent sessions. It supports Codex and Claude today and should stay easy to extend to new providers.
 
-Keep the crate as a single application crate unless the user explicitly asks for a workspace split. Prefer small modules over large files.
+Before making code changes, read [docs/architecture-and-style.md](docs/architecture-and-style.md). That file owns this project's architecture and style constraints.
 
-## Architecture Rules
+Use [docs/dev.md](docs/dev.md) for local setup, run commands, verification, and release builds.
 
-- Keep provider parsing read-only. Never mutate `~/.codex`, `~/.claude`, or provider history files.
-- Keep provider logic separate from TUI logic. Providers load normalized session data; the TUI renders and edits UI state only.
-- Keep launch command construction separate from rendering and key handling.
-- Keep process execution isolated behind a small module. Unix-only APIs must be guarded with `#[cfg(unix)]`; Windows must keep a working fallback.
-- Use `Path`/`PathBuf` for paths. Do not hard-code platform-specific separators.
-- Keep cross-platform behavior in mind for Linux, macOS, and Windows.
+## Working Principles
+
+- State important assumptions before coding when the request has multiple plausible interpretations.
+- Ask when ambiguity would risk the wrong behavior; otherwise make the smallest reasonable assumption and keep moving.
+- Prefer the minimum code that solves the requested problem. Do not add speculative features, one-off abstractions, or configurability that was not requested.
+- Keep edits surgical. Touch only files and lines that directly support the task.
+- Match the existing style and module boundaries, even when a different structure would also work.
+- Clean up unused code introduced by your own changes. Mention unrelated cleanup opportunities instead of performing them.
+
+## Goal-Driven Changes
+
+For non-trivial work, translate the request into a short verifiable goal before editing:
+
+```text
+1. Change: [what will be updated]
+   Verify: [focused command or inspection]
+2. Change: [what will be updated]
+   Verify: [focused command or inspection]
+```
+
+When fixing a bug, prefer a focused failing test or reproduction first, then make it pass. When refactoring, preserve behavior and use tests or targeted inspections to prove that the behavior stayed intact.
 
 ## Verification
 
@@ -36,24 +51,3 @@ cargo fmt --check
 When subagents are available, delegate full `cargo xtask verify` to a verifier subagent after implementation. The verifier should report pass/fail and a concise failure summary only, so the main session context stays focused.
 
 If subagents are unavailable, run `cargo xtask verify` locally.
-
-## Coding Style
-
-- Preserve behavior unless the user explicitly requests a behavior change.
-- Add or move tests with the module that owns the behavior.
-- Prefer explicit domain types over raw tuples or ad hoc strings.
-- Keep UI state transitions testable without needing a terminal.
-- Avoid broad refactors unrelated to the current task.
-
-## Provider Expectations
-
-- A provider should return normalized `Session` values.
-- Transcript extraction should preserve full user/assistant text transcript where practical.
-- Provider-specific command details belong in launch construction, not in provider parsers.
-
-## TUI Expectations
-
-- Keep key handling, app state, and rendering separated.
-- Rendering helpers should be pure where practical.
-- Do not let modal-specific keys leak into the main list behavior.
-- Preserve existing keybindings unless the user requests changes.

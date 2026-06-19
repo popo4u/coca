@@ -92,7 +92,11 @@ impl App {
             let expanded = self
                 .expanded_session
                 .as_ref()
-                .map(|key| key.provider == session.provider && key.id == session.id)
+                .map(|key| {
+                    key.origin == session.origin
+                        && key.provider == session.provider
+                        && key.id == session.id
+                })
                 .unwrap_or(false);
             let lines = session_lines(session, expanded, is_selected);
             cursor += lines.len();
@@ -115,7 +119,8 @@ impl App {
         let area = centered_rect(84, 78, frame.area());
         frame.render_widget(Clear, area);
         let title = format!(
-            " Transcript  {} {}  {} ",
+            " Transcript  {} {} {}  {} ",
+            session.origin,
             session.provider,
             short_id(&session.id),
             session.title
@@ -138,7 +143,9 @@ impl App {
     }
 
     fn render_footer(&self, frame: &mut Frame<'_>, area: Rect) {
-        let help = if self.transcript_session.is_some() {
+        let help = if let Some(message) = &self.status_message {
+            message.as_str()
+        } else if self.transcript_session.is_some() {
             "h/l page transcript  Esc close"
         } else if self.launch_dialog.is_some() {
             "↑/↓ option  Space toggle  Enter launch  Esc cancel"

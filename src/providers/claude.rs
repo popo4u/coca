@@ -6,7 +6,7 @@ use anyhow::Result;
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use crate::model::{truncate_for_title, ChatMessage, ProviderKind, Session};
+use crate::model::{truncate_for_title, ChatMessage, ProviderKind, Session, SessionOrigin};
 
 pub fn load_claude_sessions(claude_home: &Path) -> Result<Vec<Session>> {
     let projects = claude_home.join("projects");
@@ -153,6 +153,7 @@ fn parse_claude_session(path: &Path) -> Result<Option<Session>> {
     });
 
     Ok(Some(Session {
+        origin: SessionOrigin::Local,
         provider: ProviderKind::Claude,
         id: id.clone(),
         title,

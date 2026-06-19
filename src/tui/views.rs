@@ -44,6 +44,15 @@ pub(super) fn session_lines(
             Span::styled(format!("{:<6}", session.provider), provider_style),
             Span::raw(" "),
             Span::styled(
+                format!("{:<10}", session.origin),
+                if selected {
+                    selected_style
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+            Span::raw(" "),
+            Span::styled(
                 updated,
                 if selected {
                     selected_style
@@ -119,6 +128,7 @@ pub(super) fn detail_lines(session: &Session) -> Vec<Line<'static>> {
     }
 
     lines.extend([
+        kv("Origin", &session.origin.to_string()),
         kv("Provider", &session.provider.to_string()),
         kv("ID", &session.id),
         kv("CWD", &session.cwd),

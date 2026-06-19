@@ -32,10 +32,23 @@ Override provider history roots:
 cargo run -- --codex-home ~/.codex --claude-home ~/.claude
 ```
 
+Use a remote config:
+
+```sh
+cargo run -- --remote-config ~/.config/coca/remotes.json
+```
+
+Run a read-only JSON-RPC/TCP client server:
+
+```sh
+cargo run -- client serve --bind 127.0.0.1:8765 --token secret
+```
+
 Show CLI help:
 
 ```sh
 cargo run -- --help
+cargo run -- client serve --help
 ```
 
 ## Verification
@@ -114,6 +127,8 @@ rustup target add x86_64-apple-darwin
 rustup target add aarch64-apple-darwin
 rustup target add x86_64-pc-windows-msvc
 ```
+
+This project uses `rusqlite` with bundled SQLite, so Linux GNU targets also compile SQLite C code. On non-Linux hosts, `cargo xtask build --release --target linux-x64` and `cargo xtask dist --target linux-x64` use `cargo zigbuild` when both `cargo-zigbuild` and `zig` are installed. If they are unavailable and no Linux GNU C toolchain is configured, `xtask` tries Docker instead. Make sure Docker is installed and the daemon is running, or install a target C compiler such as `x86_64-linux-gnu-gcc` and expose it through `CC_x86_64_unknown_linux_gnu`.
 
 ## Platform-Specific Binaries
 

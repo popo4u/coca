@@ -108,9 +108,18 @@ impl App {
                 }
                 None
             }
-            KeyCode::Enter => self
-                .selected_session()
-                .map(|session| Action::Resume(default_resume_target(session))),
+            KeyCode::Enter => {
+                let session = self.selected_session()?;
+                if session.is_local() {
+                    Some(Action::Resume(default_resume_target(session)))
+                } else {
+                    let origin = session.origin.to_string();
+                    self.status_message = Some(format!(
+                        "Remote sessions are browse-only in this version: {origin}"
+                    ));
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -160,6 +169,13 @@ impl App {
         let Some(session) = self.selected_session() else {
             return;
         };
+        if !session.is_local() {
+            let origin = session.origin.to_string();
+            self.status_message = Some(format!(
+                "Remote sessions are browse-only in this version: {origin}"
+            ));
+            return;
+        }
         self.launch_dialog = Some(LaunchDialog {
             session: session_key(session),
             mode,

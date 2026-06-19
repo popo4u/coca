@@ -13,11 +13,12 @@ use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
 use crate::launch::{LaunchMode, LaunchOption, ResumeTarget};
-use crate::model::{ProviderFilter, ProviderKind, Session};
+use crate::model::{ProviderFilter, ProviderKind, Session, SessionOrigin};
 
 pub fn run_tui(
     sessions: Vec<Session>,
     initial_filter: ProviderFilter,
+    warnings: Vec<String>,
 ) -> Result<Option<ResumeTarget>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -26,7 +27,7 @@ pub fn run_tui(
     let mut terminal = Terminal::new(backend)?;
 
     let mut guard = TerminalGuard { restored: false };
-    let result = run_loop(&mut terminal, sessions, initial_filter);
+    let result = run_loop(&mut terminal, sessions, initial_filter, warnings);
     guard.restore()?;
     result
 }
@@ -61,8 +62,9 @@ fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     sessions: Vec<Session>,
     initial_filter: ProviderFilter,
+    warnings: Vec<String>,
 ) -> Result<Option<ResumeTarget>> {
-    let mut app = App::new(sessions, initial_filter);
+    let mut app = App::new_with_warnings(sessions, initial_filter, warnings);
     loop {
         terminal.draw(|frame| app.render(frame))?;
         if !event::poll(Duration::from_millis(150))? {
@@ -98,10 +100,12 @@ pub(super) struct App {
     pub(super) transcript_scroll: u16,
     pub(super) launch_dialog: Option<LaunchDialog>,
     pub(super) current_cwd: PathBuf,
+    pub(super) status_message: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SessionKey {
+    pub(super) origin: SessionOrigin,
     pub(super) provider: ProviderKind,
     pub(super) id: String,
 }
@@ -115,7 +119,11 @@ pub(super) struct LaunchDialog {
 }
 
 impl App {
-    pub(super) fn new(sessions: Vec<Session>, provider_filter: ProviderFilter) -> Self {
+    pub(super) fn new_with_warnings(
+        sessions: Vec<Session>,
+        provider_filter: ProviderFilter,
+        warnings: Vec<String>,
+    ) -> Self {
         let mut app = Self {
             sessions,
             filtered_indices: Vec::new(),
@@ -128,6 +136,11 @@ impl App {
             transcript_scroll: 0,
             launch_dialog: None,
             current_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            status_message: if warnings.is_empty() {
+                None
+            } else {
+                Some(format!("Remote load warnings: {}", warnings.join("; ")))
+            },
         };
         app.apply_filter();
         app
@@ -175,16 +188,20 @@ impl App {
     }
 
     pub(super) fn session_by_key(&self, key: &SessionKey) -> Option<&Session> {
-        self.sessions
-            .iter()
-            .find(|session| session.provider == key.provider && session.id == key.id)
+        self.sessions.iter().find(|session| {
+            session.origin == key.origin && session.provider == key.provider && session.id == key.id
+        })
     }
 
     fn session_key_is_visible(&self, key: &SessionKey) -> bool {
         self.filtered_indices.iter().any(|idx| {
             self.sessions
                 .get(*idx)
-                .map(|session| session.provider == key.provider && session.id == key.id)
+                .map(|session| {
+                    session.origin == key.origin
+                        && session.provider == key.provider
+                        && session.id == key.id
+                })
                 .unwrap_or(false)
         })
     }
@@ -192,6 +209,7 @@ impl App {
 
 pub(super) fn session_key(session: &Session) -> SessionKey {
     SessionKey {
+        origin: session.origin.clone(),
         provider: session.provider,
         id: session.id.clone(),
     }
@@ -206,12 +224,13 @@ mod tests {
 
     #[test]
     fn filters_sessions_by_provider_and_query() {
-        let mut app = App::new(
+        let mut app = App::new_with_warnings(
             vec![
                 session(ProviderKind::Codex, "a", "hello codex"),
                 session(ProviderKind::Claude, "b", "hello claude"),
             ],
             ProviderFilter::All,
+            Vec::new(),
         );
         assert_eq!(app.filtered_indices.len(), 2);
 
@@ -227,9 +246,10 @@ mod tests {
 
     #[test]
     fn resume_target_uses_session_cwd() {
-        let mut app = App::new(
+        let mut app = App::new_with_warnings(
             vec![session(ProviderKind::Claude, "sid", "hello claude")],
             ProviderFilter::All,
+            Vec::new(),
         );
 
         let Some(Action::Resume(target)) = app.handle_key(KeyEvent::from(KeyCode::Enter)) else {
@@ -242,9 +262,10 @@ mod tests {
 
     #[test]
     fn detail_is_collapsed_by_default_and_space_toggles_selected_row() {
-        let mut app = App::new(
+        let mut app = App::new_with_warnings(
             vec![session(ProviderKind::Claude, "sid", "hello claude")],
             ProviderFilter::All,
+            Vec::new(),
         );
 
         assert!(app.expanded_session.is_none());
@@ -253,6 +274,7 @@ mod tests {
         assert_eq!(
             app.expanded_session,
             Some(SessionKey {
+                origin: SessionOrigin::Local,
                 provider: ProviderKind::Claude,
                 id: "sid".to_string()
             })
@@ -264,12 +286,13 @@ mod tests {
 
     #[test]
     fn moving_selection_collapses_inline_detail() {
-        let mut app = App::new(
+        let mut app = App::new_with_warnings(
             vec![
                 session(ProviderKind::Codex, "a", "hello codex"),
                 session(ProviderKind::Claude, "b", "hello claude"),
             ],
             ProviderFilter::All,
+            Vec::new(),
         );
 
         app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
@@ -282,15 +305,17 @@ mod tests {
 
     #[test]
     fn transcript_modal_uses_h_l_paging_and_escape_closes() {
-        let mut app = App::new(
+        let mut app = App::new_with_warnings(
             vec![session(ProviderKind::Claude, "sid", "hello claude")],
             ProviderFilter::All,
+            Vec::new(),
         );
 
         app.handle_key(KeyEvent::from(KeyCode::Char('t')));
         assert_eq!(
             app.transcript_session,
             Some(SessionKey {
+                origin: SessionOrigin::Local,
                 provider: ProviderKind::Claude,
                 id: "sid".to_string()
             })
@@ -308,9 +333,10 @@ mod tests {
 
     #[test]
     fn s_opens_launch_dialog_and_enter_builds_codex_resume_with_options() {
-        let mut app = App::new(
+        let mut app = App::new_with_warnings(
             vec![session(ProviderKind::Codex, "sid", "hello codex")],
             ProviderFilter::All,
+            Vec::new(),
         );
         app.current_cwd = PathBuf::from("/current");
 
@@ -347,9 +373,10 @@ mod tests {
 
     #[test]
     fn f_builds_claude_fork_with_skip_permissions() {
-        let mut app = App::new(
+        let mut app = App::new_with_warnings(
             vec![session(ProviderKind::Claude, "sid", "hello claude")],
             ProviderFilter::All,
+            Vec::new(),
         );
 
         app.handle_key(KeyEvent::from(KeyCode::Char('f')));
@@ -378,8 +405,65 @@ mod tests {
         assert_eq!(target.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
     }
 
+    #[test]
+    fn filters_sessions_by_origin_query() {
+        let mut remote = session(ProviderKind::Codex, "sid", "hello codex");
+        remote.origin = SessionOrigin::Remote("work-mac".to_string());
+        let mut app = App::new_with_warnings(vec![remote], ProviderFilter::All, Vec::new());
+
+        app.query = "work-mac".to_string();
+        app.apply_filter();
+
+        assert_eq!(app.filtered_indices.len(), 1);
+    }
+
+    #[test]
+    fn session_keys_distinguish_origin() {
+        let local = session(ProviderKind::Codex, "sid", "local");
+        let mut remote = session(ProviderKind::Codex, "sid", "remote");
+        remote.origin = SessionOrigin::Remote("work-mac".to_string());
+        let app = App::new_with_warnings(vec![local, remote], ProviderFilter::All, Vec::new());
+
+        let remote_key = SessionKey {
+            origin: SessionOrigin::Remote("work-mac".to_string()),
+            provider: ProviderKind::Codex,
+            id: "sid".to_string(),
+        };
+
+        assert_eq!(app.session_by_key(&remote_key).unwrap().title, "remote");
+    }
+
+    #[test]
+    fn enter_blocks_remote_resume() {
+        let mut remote = session(ProviderKind::Claude, "sid", "hello claude");
+        remote.origin = SessionOrigin::Remote("work-mac".to_string());
+        let mut app = App::new_with_warnings(vec![remote], ProviderFilter::All, Vec::new());
+
+        assert!(app.handle_key(KeyEvent::from(KeyCode::Enter)).is_none());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Remote sessions are browse-only in this version: work-mac")
+        );
+    }
+
+    #[test]
+    fn s_blocks_remote_launch_dialog() {
+        let mut remote = session(ProviderKind::Codex, "sid", "hello codex");
+        remote.origin = SessionOrigin::Remote("work-mac".to_string());
+        let mut app = App::new_with_warnings(vec![remote], ProviderFilter::All, Vec::new());
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+
+        assert!(app.launch_dialog.is_none());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Remote sessions are browse-only in this version: work-mac")
+        );
+    }
+
     fn session(provider: ProviderKind, id: &str, title: &str) -> Session {
         Session {
+            origin: SessionOrigin::Local,
             provider,
             id: id.to_string(),
             title: title.to_string(),

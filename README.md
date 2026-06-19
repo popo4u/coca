@@ -1,17 +1,18 @@
 # coca
 
-`coca` (Chat Once, Continue Anywhere) is a unified terminal UI for local coder-agent sessions.
+`coca` (Chat Once, Continue Anywhere) is a unified terminal UI for local and configured remote coder-agent sessions.
 
-It lets you browse, inspect, resume, and fork conversations created by tools like Codex and Claude from one place. Instead of remembering which agent owns a session or manually searching through provider-specific history files, `coca` normalizes the local histories into a single interactive session list.
+It lets you browse, inspect, resume, and fork conversations created by tools like Codex and Claude from one place. Instead of remembering which agent owns a session or manually searching through provider-specific history files, `coca` normalizes local and remote histories into a single interactive session list.
 
 ## What It Does
 
-- Lists local Codex and Claude sessions in one TUI.
+- Lists local and configured remote Codex and Claude sessions in one TUI.
 - Filters by provider and searches across session text.
 - Shows session metadata and the full first prompt inline.
 - Opens a transcript viewer for reconstructed conversation history.
 - Resumes existing sessions with the right provider command.
 - Forks or executes sessions with provider-specific launch options.
+- Fetches remote sessions through a read-only JSON-RPC/TCP client.
 - Keeps provider history read-only.
 
 ## Why
@@ -44,7 +45,28 @@ coca --provider all
 coca --provider codex
 coca --provider claude
 coca --codex-home ~/.codex --claude-home ~/.claude
+coca --remote-config ~/.config/coca/remotes.json
 ```
+
+## Remote Clients
+
+Run a read-only RPC server on a machine that has Codex or Claude history:
+
+```sh
+coca client serve --bind 0.0.0.0:8765 --token <secret>
+```
+
+Configure the browsing machine with `~/.config/coca/remotes.json`:
+
+```json
+{
+  "remotes": [
+    { "name": "work-mac", "addr": "192.168.1.20:8765", "token": "<secret>" }
+  ]
+}
+```
+
+Remote sessions support listing, search, details, and transcript viewing. Resume, execute, and fork are local-only in this version.
 
 ## Keybindings
 
