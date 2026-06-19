@@ -10,6 +10,7 @@ It lets you browse, inspect, resume, and fork conversations created by tools lik
 - Filters by provider and searches across session text.
 - Shows session metadata and the full first prompt inline.
 - Opens a transcript viewer for reconstructed conversation history.
+- Shows a read-only Web share URL for local sessions when configured.
 - Resumes existing sessions with the right provider command.
 - Forks or executes sessions with provider-specific launch options.
 - Fetches remote sessions through a read-only JSON-RPC/TCP client.
@@ -69,11 +70,31 @@ By default `coca` reads and writes settings at `~/.config/coca/settings.json`:
   "launch_defaults": {
     "resume": { "use_current_dir": false, "yolo": false },
     "fork": { "use_current_dir": false, "yolo": false }
+  },
+  "share": {
+    "base_url": "http://192.168.1.20:8787",
+    "token": "<secret>"
   }
 }
 ```
 
 Press `,` in the TUI to toggle visible origins and the default launch options used by `s` execute and `f` fork dialogs. If `settings.json` does not exist, `coca` will still read an existing `~/.config/coca/remotes.json` for compatibility.
+
+## Read-Only Web Sharing
+
+Run a read-only HTTP server on a machine that has Codex or Claude history:
+
+```sh
+coca share serve --bind 0.0.0.0:8787 --token <secret>
+```
+
+Open settings with `,`, edit `share.base_url` and `share.token`, then press `u` on a local session in the TUI to show its browser URL:
+
+```text
+http://192.168.1.20:8787/s/codex/<session-id>?token=<secret>
+```
+
+Shared sessions are browse-only and expose metadata plus the reconstructed transcript. The Web page does not include source paths or resume/fork commands. Anyone with the URL, token, and network access can read the session, so use a strong token and bind only to networks you trust.
 
 ## Remote Clients
 
@@ -102,11 +123,12 @@ Remote sessions support listing, search, details, and transcript viewing. Resume
 | `Up` / `Down`, `j` / `k` | Move selection |
 | `/` | Search sessions |
 | `Tab` | Cycle provider filter |
-| `,` | Open settings |
+| `,` | Open settings and edit saved configuration |
 | `?` | Open help |
 | `Space` | Expand or collapse session details |
 | `t` | Open transcript viewer |
 | `h` / `l` | Page transcript backward or forward |
+| `u` | Show read-only share URL for local session |
 | `Enter` | Resume selected session |
 | `s` | Execute selected session with launch options |
 | `f` | Fork selected session with launch options |

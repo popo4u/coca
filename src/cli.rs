@@ -73,6 +73,7 @@ impl From<ProviderArg> for ProviderFilter {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Client(ClientArgs),
+    Share(ShareArgs),
 }
 
 #[derive(Debug, Args)]
@@ -90,6 +91,23 @@ impl ClientArgs {
 #[derive(Debug, Subcommand)]
 pub enum ClientCommand {
     Serve(ServeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ShareArgs {
+    #[command(subcommand)]
+    command: ShareCommand,
+}
+
+impl ShareArgs {
+    pub fn command(&self) -> &ShareCommand {
+        &self.command
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ShareCommand {
+    Serve(ShareServeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -111,6 +129,50 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
+    pub fn bind(&self) -> String {
+        self.bind.clone()
+    }
+
+    pub fn token(&self) -> String {
+        self.token.clone()
+    }
+
+    pub fn codex_home(&self) -> Option<PathBuf> {
+        self.codex_home
+            .clone()
+            .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+    }
+
+    pub fn claude_home(&self) -> Option<PathBuf> {
+        self.claude_home
+            .clone()
+            .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
+    }
+
+    pub fn provider_filter(&self) -> ProviderFilter {
+        self.provider.into()
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct ShareServeArgs {
+    #[arg(long, value_name = "HOST:PORT")]
+    bind: String,
+
+    #[arg(long)]
+    token: String,
+
+    #[arg(long, value_name = "DIR")]
+    codex_home: Option<PathBuf>,
+
+    #[arg(long, value_name = "DIR")]
+    claude_home: Option<PathBuf>,
+
+    #[arg(long, value_enum, default_value_t = ProviderArg::All)]
+    provider: ProviderArg,
+}
+
+impl ShareServeArgs {
     pub fn bind(&self) -> String {
         self.bind.clone()
     }

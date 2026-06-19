@@ -10,6 +10,12 @@ Before making code changes, read [docs/architecture-and-style.md](docs/architect
 
 Use [docs/dev.md](docs/dev.md) for local setup, run commands, verification, and release builds.
 
+## Long-Term Task Memory
+
+Use `.ai/` for durable planning notes, long-term task memory, and handoff context. Files in `.ai/` can record goals, staged plans, product decisions, and implementation status for work that spans multiple sessions.
+
+`AGENTS.md` remains the constitution-level repository guidance: architecture constraints, working principles, and verification expectations. Do not treat `.ai/` notes as overriding `AGENTS.md`, `docs/architecture-and-style.md`, or explicit user instructions.
+
 ## Working Principles
 
 - State important assumptions before coding when the request has multiple plausible interpretations.

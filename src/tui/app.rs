@@ -116,8 +116,10 @@ pub(super) struct App {
     pub(super) expanded_session: Option<SessionKey>,
     pub(super) transcript_session: Option<SessionKey>,
     pub(super) transcript_scroll: u16,
+    pub(super) share_dialog: Option<ShareDialog>,
     pub(super) launch_dialog: Option<LaunchDialog>,
     pub(super) config_page: Option<ConfigPage>,
+    pub(super) config_edit: Option<ConfigEdit>,
     pub(super) help_page: Option<HelpPage>,
     pub(super) current_cwd: PathBuf,
     pub(super) status_message: Option<String>,
@@ -140,9 +142,21 @@ pub(super) struct LaunchDialog {
     pub(super) options: Vec<LaunchOption>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ShareDialog {
+    pub(super) session: SessionKey,
+    pub(super) url: String,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct ConfigPage {
     pub(super) selected_item: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ConfigEdit {
+    pub(super) item: ConfigItem,
+    pub(super) input: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -156,6 +170,8 @@ pub(super) enum ConfigItem {
         mode: LaunchMode,
         kind: LaunchOptionKind,
     },
+    ShareBaseUrl,
+    ShareToken,
 }
 
 impl App {
@@ -191,8 +207,10 @@ impl App {
             expanded_session: None,
             transcript_session: None,
             transcript_scroll: 0,
+            share_dialog: None,
             launch_dialog: None,
             config_page: None,
+            config_edit: None,
             help_page: None,
             current_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             status_message: if warnings.is_empty() {
@@ -289,6 +307,8 @@ impl App {
         let mut items = vec![ConfigItem::OriginLocal];
         items.extend(remote_names.into_iter().map(ConfigItem::OriginRemote));
         items.extend([
+            ConfigItem::ShareBaseUrl,
+            ConfigItem::ShareToken,
             ConfigItem::LaunchDefault {
                 mode: LaunchMode::Resume,
                 kind: LaunchOptionKind::UseCurrentDir,
@@ -441,6 +461,70 @@ mod tests {
 
         assert!(app.handle_key(KeyEvent::from(KeyCode::Esc)).is_none());
         assert!(app.transcript_session.is_none());
+    }
+
+    #[test]
+    fn u_opens_share_dialog_for_local_session() {
+        let mut settings = Settings::default();
+        settings.share.base_url = "http://host:8787".to_string();
+        settings.share.token = "secret".to_string();
+        let mut app = App::new_with_settings(
+            vec![session(ProviderKind::Codex, "sid", "hello codex")],
+            ProviderFilter::All,
+            Vec::new(),
+            settings,
+            None,
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('u')));
+
+        assert_eq!(
+            app.share_dialog.as_ref().map(|dialog| dialog.url.as_str()),
+            Some("http://host:8787/s/codex/sid?token=secret")
+        );
+    }
+
+    #[test]
+    fn u_requires_share_settings() {
+        let mut app = App::new_with_warnings(
+            vec![session(ProviderKind::Codex, "sid", "hello codex")],
+            ProviderFilter::All,
+            Vec::new(),
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('u')));
+
+        assert!(app.share_dialog.is_none());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some(
+                "Configure share.base_url and share.token in settings.json to generate share URLs."
+            )
+        );
+    }
+
+    #[test]
+    fn u_blocks_remote_share_url() {
+        let mut remote = session(ProviderKind::Claude, "sid", "hello claude");
+        remote.origin = SessionOrigin::Remote("work-mac".to_string());
+        let mut settings = Settings::default();
+        settings.share.base_url = "http://host:8787".to_string();
+        settings.share.token = "secret".to_string();
+        let mut app = App::new_with_settings(
+            vec![remote],
+            ProviderFilter::All,
+            Vec::new(),
+            settings,
+            None,
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('u')));
+
+        assert!(app.share_dialog.is_none());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Remote sessions cannot be shared from this machine in v0: work-mac")
+        );
     }
 
     #[test]
@@ -633,6 +717,60 @@ mod tests {
     }
 
     #[test]
+    fn config_page_edits_share_base_url() {
+        let mut app = App::new_with_warnings(
+            vec![session(ProviderKind::Claude, "sid", "hello claude")],
+            ProviderFilter::All,
+            Vec::new(),
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(',')));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(
+            app.config_edit,
+            Some(ConfigEdit {
+                item: ConfigItem::ShareBaseUrl,
+                input: String::new()
+            })
+        );
+
+        for ch in "http://127.0.0.1:8787".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(ch)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert!(app.config_edit.is_none());
+        assert_eq!(app.settings.share.base_url, "http://127.0.0.1:8787");
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Settings updated for this run only.")
+        );
+    }
+
+    #[test]
+    fn config_page_edits_share_token() {
+        let mut app = App::new_with_warnings(
+            vec![session(ProviderKind::Claude, "sid", "hello claude")],
+            ProviderFilter::All,
+            Vec::new(),
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(',')));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        for ch in "secret".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(ch)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(app.settings.share.token, "secret");
+    }
+
+    #[test]
     fn config_page_toggles_launch_defaults_used_by_s_dialog() {
         let mut app = App::new_with_warnings(
             vec![session(ProviderKind::Codex, "sid", "hello codex")],
@@ -641,6 +779,8 @@ mod tests {
         );
 
         app.handle_key(KeyEvent::from(KeyCode::Char(',')));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
         app.handle_key(KeyEvent::from(KeyCode::Down));
         app.handle_key(KeyEvent::from(KeyCode::Down));
         app.handle_key(KeyEvent::from(KeyCode::Char(' ')));

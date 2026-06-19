@@ -10,7 +10,7 @@ use crate::launch::{LaunchMode, LaunchOptionKind};
 use crate::model::{Session, SessionOrigin};
 use crate::tui::formatting::{short_id, short_path};
 
-use super::app::{App, ConfigItem, ConfigPage, HelpPage, LaunchDialog};
+use super::app::{App, ConfigEdit, ConfigItem, ConfigPage, HelpPage, LaunchDialog, ShareDialog};
 use super::views::{
     centered_rect, centered_rect_fixed_height, launch_dialog_height, session_lines, transcript_text,
 };
@@ -42,8 +42,14 @@ impl App {
                 self.render_launch_dialog(frame, dialog, session);
             }
         }
+        if let Some(dialog) = &self.share_dialog {
+            self.render_share_dialog(frame, dialog);
+        }
         if let Some(config_page) = &self.config_page {
             self.render_config_page(frame, config_page);
+        }
+        if let Some(edit) = &self.config_edit {
+            self.render_config_edit(frame, edit);
         }
         if let Some(help_page) = &self.help_page {
             self.render_help_page(frame, help_page);
@@ -152,18 +158,22 @@ impl App {
     fn render_footer(&self, frame: &mut Frame<'_>, area: Rect) {
         let help = if self.help_page.is_some() {
             "?/Esc close help"
-        } else if let Some(message) = &self.status_message {
-            message.as_str()
         } else if self.transcript_session.is_some() {
             "h/l page transcript  Esc close"
+        } else if self.share_dialog.is_some() {
+            "u/Esc close share URL"
         } else if self.launch_dialog.is_some() {
             "↑/↓ option  Space toggle  Enter launch  Esc cancel"
+        } else if self.config_edit.is_some() {
+            "type value  Ctrl-U clear  Enter save  Esc cancel"
+        } else if let Some(message) = &self.status_message {
+            message.as_str()
         } else if self.config_page.is_some() {
-            "↑/↓ setting  Space/Enter toggle  Esc close"
+            "↑/↓ setting  Space/Enter edit or toggle  Esc close"
         } else if self.search_mode {
             "type search  Enter accept  Esc close"
         } else {
-            "↑/↓ move  / search  Tab provider  , config  ? help  Space detail  t transcript  s execute  f fork  Enter resume  q quit"
+            "↑/↓ move  / search  Tab provider  , config  ? help  Space detail  t transcript  u share URL  s execute  f fork  Enter resume  q quit"
         };
         let footer = Paragraph::new(help)
             .fg(Color::LightMagenta)
@@ -251,6 +261,44 @@ impl App {
         frame.render_widget(paragraph, area);
     }
 
+    fn render_share_dialog(&self, frame: &mut Frame<'_>, dialog: &ShareDialog) {
+        let area = centered_rect_fixed_height(82, 8, frame.area());
+        frame.render_widget(Clear, area);
+
+        let title = self
+            .session_by_key(&dialog.session)
+            .map(|session| {
+                format!(
+                    " Share URL  {} {} {} ",
+                    session.provider,
+                    short_id(&session.id),
+                    session.title
+                )
+            })
+            .unwrap_or_else(|| " Share URL ".to_string());
+
+        let lines = vec![
+            Line::styled(
+                "Read-only browser link",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::raw(""),
+            Line::raw(dialog.url.clone()),
+            Line::raw(""),
+            Line::styled(
+                "Anyone with this URL and network access can read the session.",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ];
+
+        let paragraph = Paragraph::new(Text::from(lines))
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
+    }
+
     fn render_help_page(&self, frame: &mut Frame<'_>, _help_page: &HelpPage) {
         let area = centered_rect_fixed_height(78, 24, frame.area());
         frame.render_widget(Clear, area);
@@ -267,6 +315,7 @@ impl App {
             section("Session"),
             item("Space", "Expand or collapse details"),
             item("t", "Open transcript"),
+            item("u", "Show read-only share URL for local session"),
             item("h/l, Left/Right, PageUp/PageDown", "Page transcript"),
             item("Enter", "Resume selected local session"),
             item("s", "Execute selected local session with options"),
@@ -274,7 +323,10 @@ impl App {
             Line::raw(""),
             section("Settings and Dialogs"),
             item(",", "Open settings"),
-            item("Space/Enter", "Toggle selected setting or launch option"),
+            item(
+                "Space/Enter",
+                "Edit/toggle selected setting or launch option",
+            ),
             item("Esc", "Close modal or quit from the main list"),
             item("q, Ctrl-C", "Quit from the main list"),
         ];
@@ -287,7 +339,7 @@ impl App {
 
     fn render_config_page(&self, frame: &mut Frame<'_>, config_page: &ConfigPage) {
         let items = self.config_items();
-        let height = (items.len() as u16 + 8).clamp(12, 24);
+        let height = (items.len() as u16 + 11).clamp(14, 28);
         let area = centered_rect_fixed_height(76, height, frame.area());
         frame.render_widget(Clear, area);
 
@@ -301,8 +353,22 @@ impl App {
             Line::raw(""),
         ];
 
+        let mut share_header_added = false;
         let mut defaults_header_added = false;
         for (idx, item) in items.iter().enumerate() {
+            if matches!(item, ConfigItem::ShareBaseUrl | ConfigItem::ShareToken)
+                && !share_header_added
+            {
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    "Share",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                lines.push(Line::raw(""));
+                share_header_added = true;
+            }
             if matches!(item, ConfigItem::LaunchDefault { .. }) && !defaults_header_added {
                 lines.push(Line::raw(""));
                 lines.push(Line::styled(
@@ -324,21 +390,25 @@ impl App {
                 Style::default().fg(Color::White)
             };
             let marker = if selected { "› " } else { "  " };
-            let checkbox = if self.config_item_enabled(item) {
-                "[x] "
+            let control = if self.config_item_is_toggle(item) {
+                if self.config_item_enabled(item) {
+                    "[x] "
+                } else {
+                    "[ ] "
+                }
             } else {
-                "[ ] "
+                "    "
             };
             lines.push(Line::from(vec![
                 Span::styled(marker, style),
-                Span::styled(checkbox, style),
+                Span::styled(control, style),
                 Span::styled(self.config_item_label(item), style),
             ]));
         }
 
         lines.push(Line::raw(""));
         lines.push(Line::styled(
-            "Remote changes are saved; newly enabled remotes load on next start.",
+            "Settings are saved on change. Newly enabled remotes load on next start.",
             Style::default().fg(Color::DarkGray),
         ));
 
@@ -348,11 +418,40 @@ impl App {
         frame.render_widget(paragraph, area);
     }
 
+    fn render_config_edit(&self, frame: &mut Frame<'_>, edit: &ConfigEdit) {
+        let area = centered_rect_fixed_height(72, 6, frame.area());
+        frame.render_widget(Clear, area);
+
+        let title = format!(" Edit {} ", self.config_edit_title(&edit.item));
+        let lines = vec![
+            Line::styled(
+                self.config_edit_hint(&edit.item),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Line::raw(""),
+            Line::raw(edit.input.clone()),
+        ];
+        let paragraph = Paragraph::new(Text::from(lines))
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
+    }
+
+    fn config_item_is_toggle(&self, item: &ConfigItem) -> bool {
+        matches!(
+            item,
+            ConfigItem::OriginLocal
+                | ConfigItem::OriginRemote(_)
+                | ConfigItem::LaunchDefault { .. }
+        )
+    }
+
     fn config_item_enabled(&self, item: &ConfigItem) -> bool {
         match item {
             ConfigItem::OriginLocal => self.settings.origin_visible(&SessionOrigin::Local),
             ConfigItem::OriginRemote(name) => self.settings.remote_enabled(name),
             ConfigItem::LaunchDefault { mode, kind } => self.settings.launch_default(*mode, *kind),
+            ConfigItem::ShareBaseUrl | ConfigItem::ShareToken => false,
         }
     }
 
@@ -360,6 +459,18 @@ impl App {
         match item {
             ConfigItem::OriginLocal => "origin local".to_string(),
             ConfigItem::OriginRemote(name) => format!("origin {name}"),
+            ConfigItem::ShareBaseUrl => format!(
+                "share base URL: {}",
+                display_setting_value(&self.settings.share.base_url)
+            ),
+            ConfigItem::ShareToken => format!(
+                "share token: {}",
+                if self.settings.share.token.is_empty() {
+                    "<empty>"
+                } else {
+                    "<set>"
+                }
+            ),
             ConfigItem::LaunchDefault { mode, kind } => {
                 let key = match mode {
                     LaunchMode::Resume => "s execute",
@@ -371,6 +482,26 @@ impl App {
                 };
                 format!("{key}: {option}")
             }
+        }
+    }
+
+    fn config_edit_title(&self, item: &ConfigItem) -> &'static str {
+        match item {
+            ConfigItem::ShareBaseUrl => "share.base_url",
+            ConfigItem::ShareToken => "share.token",
+            ConfigItem::OriginLocal
+            | ConfigItem::OriginRemote(_)
+            | ConfigItem::LaunchDefault { .. } => "setting",
+        }
+    }
+
+    fn config_edit_hint(&self, item: &ConfigItem) -> &'static str {
+        match item {
+            ConfigItem::ShareBaseUrl => "Example: http://192.168.1.20:8787",
+            ConfigItem::ShareToken => "Use the same token passed to coca share serve.",
+            ConfigItem::OriginLocal
+            | ConfigItem::OriginRemote(_)
+            | ConfigItem::LaunchDefault { .. } => "",
         }
     }
 }
@@ -393,4 +524,12 @@ fn item(key: &'static str, description: &'static str) -> Line<'static> {
         ),
         Span::raw(description),
     ])
+}
+
+fn display_setting_value(value: &str) -> String {
+    if value.is_empty() {
+        "<empty>".to_string()
+    } else {
+        value.to_string()
+    }
 }

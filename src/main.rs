@@ -5,15 +5,17 @@ mod process;
 mod providers;
 mod remote;
 mod settings;
+mod share;
 mod tui;
 
 use anyhow::Result;
 
-use crate::cli::{Cli, ClientCommand, Command};
+use crate::cli::{Cli, ClientCommand, Command, ShareCommand};
 use crate::process::exec_resume;
 use crate::providers::{load_sessions, sort_sessions};
 use crate::remote::{load_remote_sessions, serve, ServeOptions};
 use crate::settings::load_settings_for_cli;
+use crate::share::{serve as serve_share, ShareServeOptions};
 use crate::tui::run_tui;
 
 fn main() -> Result<()> {
@@ -22,6 +24,15 @@ fn main() -> Result<()> {
         return match command {
             Command::Client(client) => match client.command() {
                 ClientCommand::Serve(args) => serve(ServeOptions {
+                    bind: args.bind(),
+                    token: args.token(),
+                    codex_home: args.codex_home(),
+                    claude_home: args.claude_home(),
+                    provider_filter: args.provider_filter(),
+                }),
+            },
+            Command::Share(share) => match share.command() {
+                ShareCommand::Serve(args) => serve_share(ShareServeOptions {
                     bind: args.bind(),
                     token: args.token(),
                     codex_home: args.codex_home(),

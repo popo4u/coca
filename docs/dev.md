@@ -52,11 +52,21 @@ Run a read-only JSON-RPC/TCP client server:
 cargo run -- client serve --bind 127.0.0.1:8765 --token secret
 ```
 
+Run a read-only HTTP share server:
+
+```sh
+cargo run -- share serve --bind 127.0.0.1:8787 --token secret
+```
+
+In the TUI, press `,` to edit `share.base_url` and `share.token`, then press `u`
+on a local session to show its share URL.
+
 Show CLI help:
 
 ```sh
 cargo run -- --help
 cargo run -- client serve --help
+cargo run -- share serve --help
 ```
 
 ## Verification

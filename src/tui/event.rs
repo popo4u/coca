@@ -2,8 +2,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::launch::{build_launch_target, default_resume_target, launch_options, LaunchMode};
 use crate::settings::save_settings;
+use crate::share::build_share_url;
 
-use super::app::{session_key, Action, App, ConfigItem, ConfigPage, HelpPage, LaunchDialog};
+use super::app::{
+    session_key, Action, App, ConfigEdit, ConfigItem, ConfigPage, HelpPage, LaunchDialog,
+    ShareDialog,
+};
 
 impl App {
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
@@ -49,6 +53,20 @@ impl App {
             return None;
         }
 
+        if self.share_dialog.is_some() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('u') => {
+                    self.share_dialog = None;
+                }
+                _ => {}
+            }
+            return None;
+        }
+
+        if self.config_edit.is_some() {
+            return self.handle_config_edit_key(key);
+        }
+
         if self.config_page.is_some() {
             return self.handle_config_key(key);
         }
@@ -87,6 +105,10 @@ impl App {
             KeyCode::Char('t') => {
                 self.transcript_session = self.selected_key();
                 self.transcript_scroll = 0;
+                None
+            }
+            KeyCode::Char('u') => {
+                self.open_share_dialog();
                 None
             }
             KeyCode::Char('s') => {
@@ -186,6 +208,7 @@ impl App {
     fn handle_config_key(&mut self, key: KeyEvent) -> Option<Action> {
         match key.code {
             KeyCode::Esc | KeyCode::Char(',') => {
+                self.config_edit = None;
                 self.config_page = None;
                 None
             }
@@ -205,6 +228,38 @@ impl App {
             }
             KeyCode::Char(' ') | KeyCode::Enter => {
                 self.toggle_selected_config_item();
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_config_edit_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Esc => {
+                self.config_edit = None;
+                None
+            }
+            KeyCode::Enter => {
+                self.save_config_edit();
+                None
+            }
+            KeyCode::Backspace => {
+                if let Some(edit) = &mut self.config_edit {
+                    edit.input.pop();
+                }
+                None
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(edit) = &mut self.config_edit {
+                    edit.input.clear();
+                }
+                None
+            }
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(edit) = &mut self.config_edit {
+                    edit.input.push(ch);
+                }
                 None
             }
             _ => None,
@@ -237,6 +292,34 @@ impl App {
             mode,
             selected_option: 0,
             options: self.launch_options_with_defaults(session, mode),
+        });
+    }
+
+    fn open_share_dialog(&mut self) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        if !session.is_local() {
+            let origin = session.origin.to_string();
+            self.status_message = Some(format!(
+                "Remote sessions cannot be shared from this machine in v0: {origin}"
+            ));
+            return;
+        }
+
+        let base_url = self.settings.share.base_url.trim();
+        let token = self.settings.share.token.trim();
+        if base_url.is_empty() || token.is_empty() {
+            self.status_message = Some(
+                "Configure share.base_url and share.token in settings.json to generate share URLs."
+                    .to_string(),
+            );
+            return;
+        }
+
+        self.share_dialog = Some(ShareDialog {
+            session: session_key(session),
+            url: build_share_url(base_url, token, session),
         });
     }
 
@@ -283,9 +366,44 @@ impl App {
                 let enabled = !self.settings.launch_default(mode, kind);
                 self.settings.set_launch_default(mode, kind, enabled);
             }
+            ConfigItem::ShareBaseUrl | ConfigItem::ShareToken => {
+                self.open_config_edit(item);
+                return;
+            }
         }
 
         self.clamp_config_selection();
+        self.save_settings_from_tui();
+    }
+
+    fn open_config_edit(&mut self, item: ConfigItem) {
+        let input = match &item {
+            ConfigItem::ShareBaseUrl => self.settings.share.base_url.clone(),
+            ConfigItem::ShareToken => self.settings.share.token.clone(),
+            ConfigItem::OriginLocal
+            | ConfigItem::OriginRemote(_)
+            | ConfigItem::LaunchDefault { .. } => String::new(),
+        };
+        self.config_edit = Some(ConfigEdit { item, input });
+    }
+
+    fn save_config_edit(&mut self) {
+        let Some(edit) = self.config_edit.take() else {
+            return;
+        };
+
+        match edit.item {
+            ConfigItem::ShareBaseUrl => {
+                self.settings.share.base_url = edit.input.trim().to_string();
+            }
+            ConfigItem::ShareToken => {
+                self.settings.share.token = edit.input.trim().to_string();
+            }
+            ConfigItem::OriginLocal
+            | ConfigItem::OriginRemote(_)
+            | ConfigItem::LaunchDefault { .. } => {}
+        }
+
         self.save_settings_from_tui();
     }
 

@@ -17,6 +17,8 @@ pub struct Settings {
     pub origin_visibility: OriginVisibility,
     #[serde(default)]
     pub launch_defaults: LaunchDefaults,
+    #[serde(default)]
+    pub share: ShareSettings,
 }
 
 impl Settings {
@@ -100,6 +102,14 @@ impl Settings {
     pub fn set_launch_default(&mut self, mode: LaunchMode, kind: LaunchOptionKind, enabled: bool) {
         self.launch_defaults.for_mode_mut(mode).set(kind, enabled);
     }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ShareSettings {
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub token: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -271,6 +281,10 @@ mod tests {
                 "launch_defaults": {
                     "resume": { "yolo": true },
                     "fork": { "use_current_dir": true }
+                },
+                "share": {
+                    "base_url": "http://192.168.1.20:8787",
+                    "token": "secret"
                 }
             }"#,
         )
@@ -280,6 +294,8 @@ mod tests {
         assert!(settings.origin_visible(&SessionOrigin::Local));
         assert!(settings.launch_default(LaunchMode::Resume, LaunchOptionKind::Yolo));
         assert!(settings.launch_default(LaunchMode::Fork, LaunchOptionKind::UseCurrentDir));
+        assert_eq!(settings.share.base_url, "http://192.168.1.20:8787");
+        assert_eq!(settings.share.token, "secret");
     }
 
     #[test]
