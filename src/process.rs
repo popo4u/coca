@@ -1,6 +1,5 @@
 use anyhow::Result;
-
-use crate::launch::ResumeTarget;
+use coca_core::launch::ResumeTarget;
 
 #[cfg(unix)]
 pub fn exec_resume(target: ResumeTarget) -> Result<()> {

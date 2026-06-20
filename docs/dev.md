@@ -44,29 +44,34 @@ The default persistent settings file is:
 ~/.config/coca/settings.json
 ```
 
-It stores configured remotes, origin visibility, and the default launch options used by the `s` execute and `f` fork dialogs. The TUI settings page is opened with `,`. `--remote-config` remains available as a remotes-only override, and an existing `~/.config/coca/remotes.json` is still read when `settings.json` does not exist.
+It stores core bind settings, configured remotes, origin visibility, share settings, and the default launch options used by the `s` execute and `f` fork dialogs. The TUI settings page is opened with `,`. `--remote-config` remains available as a remotes-only override, and an existing `~/.config/coca/remotes.json` is still read when `settings.json` does not exist.
 
-Run a read-only JSON-RPC/TCP client server:
-
-```sh
-cargo run -- client serve --bind 127.0.0.1:8765 --token secret
-```
-
-Run a read-only HTTP share server:
+Run the read-only core server:
 
 ```sh
-cargo run -- share serve --bind 127.0.0.1:8787 --token secret
+cargo run -- core
 ```
 
-In the TUI, press `,` to edit `share.base_url` and `share.token`, then press `u`
-on a local session to show its share URL.
+Override the core bind for this run:
+
+```sh
+cargo run -- core --bind 127.0.0.1:8787
+```
+
+Run the local JSON-RPC daemon for frontend/core IPC:
+
+```sh
+cargo run -- daemon
+cargo run -- daemon --socket ~/.config/coca/core.sock
+```
+
+In the TUI, press `,` to edit `core.bind`, `share.base_url`, and `share.token`, then press `u` on a local session to show its share URL. Restart `coca core` after changing core or share settings used by the running server.
 
 Show CLI help:
 
 ```sh
 cargo run -- --help
-cargo run -- client serve --help
-cargo run -- share serve --help
+cargo run -- core --help
 ```
 
 ## Verification
@@ -80,9 +85,9 @@ cargo xtask verify
 It runs:
 
 ```sh
-cargo fmt --check
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo fmt --all --check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Focused commands are also available:
@@ -173,21 +178,21 @@ The current release flow intentionally publishes bare binaries only. It does not
 
 ## Architecture Notes
 
-The crate is organized by responsibility:
+The workspace is organized by responsibility:
 
-- `src/model.rs`: normalized provider/session data.
-- `src/providers/`: read-only loaders for provider history.
-- `src/launch.rs`: resume, execute, and fork command construction.
-- `src/process.rs`: Unix `exec` and non-Unix child-process fallback.
-- `src/cli.rs`: command-line parsing and default provider roots.
-- `src/tui/`: app state, key handling, rendering, and view helpers.
+- `crates/coca-core/`: normalized models, provider loaders, session catalog, settings, share, remote loading, and launch planning.
+- `crates/coca-protocol/`: JSON-RPC wire types for frontend/core communication.
+- `crates/coca-ipc/`: local IPC framing and transport helpers.
+- `crates/coca-daemon/`: core host, RPC router, and server adapters.
+- `crates/coca-tui/`: app state, key handling, rendering, and view helpers.
+- `src/`: root CLI shell and final process execution bridge.
 - `xtask/`: project automation.
 
 When adding a provider:
 
-1. Add provider-specific parsing under `src/providers/`.
-2. Normalize data into `model::Session`.
-3. Add provider command construction in `src/launch.rs`.
+1. Add provider-specific parsing under `crates/coca-core/src/providers/`.
+2. Normalize data into `coca_core::model::Session`.
+3. Add provider command construction in `crates/coca-core/src/launch.rs`.
 4. Keep provider storage read-only.
 5. Add focused parser and launch tests.
 

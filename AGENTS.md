@@ -4,7 +4,7 @@ Guidance for agents working in this repository.
 
 ## Start Here
 
-`coca` is a Rust terminal UI for browsing, inspecting, resuming, and forking local coder-agent sessions. It supports Codex and Claude today and should stay easy to extend to new providers.
+`coca` is a Rust workspace for browsing, inspecting, resuming, and forking local coder-agent sessions. It supports Codex and Claude today and should stay easy to extend to new providers and frontends.
 
 Before making code changes, read [docs/architecture-and-style.md](docs/architecture-and-style.md). That file owns this project's architecture and style constraints.
 
@@ -49,9 +49,9 @@ cargo xtask verify
 While implementing, run focused checks locally when they are useful:
 
 ```sh
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
 ```
 
 When subagents are available, delegate full `cargo xtask verify` to a verifier subagent after implementation. The verifier should report pass/fail and a concise failure summary only, so the main session context stays focused.

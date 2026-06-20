@@ -1,0 +1,13 @@
+[package]
+name = "coca-daemon"
+version = "0.1.0"
+edition = "2021"
+description = "Core daemon host for coca."
+
+[dependencies]
+anyhow = "1.0"
+coca-core = { path = "../coca-core" }
+coca-ipc = { path = "../coca-ipc" }
+coca-protocol = { path = "../coca-protocol" }
+serde = "1.0"
+serde_json = "1.0"

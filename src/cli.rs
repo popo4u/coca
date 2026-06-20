@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-
-use crate::model::ProviderFilter;
+use coca_core::model::ProviderFilter;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Unified TUI for Codex and Claude sessions")]
@@ -72,51 +71,14 @@ impl From<ProviderArg> for ProviderFilter {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    Client(ClientArgs),
-    Share(ShareArgs),
+    Core(CoreArgs),
+    Daemon(DaemonArgs),
 }
 
 #[derive(Debug, Args)]
-pub struct ClientArgs {
-    #[command(subcommand)]
-    command: ClientCommand,
-}
-
-impl ClientArgs {
-    pub fn command(&self) -> &ClientCommand {
-        &self.command
-    }
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ClientCommand {
-    Serve(ServeArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct ShareArgs {
-    #[command(subcommand)]
-    command: ShareCommand,
-}
-
-impl ShareArgs {
-    pub fn command(&self) -> &ShareCommand {
-        &self.command
-    }
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ShareCommand {
-    Serve(ShareServeArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct ServeArgs {
+pub struct CoreArgs {
     #[arg(long, value_name = "HOST:PORT")]
-    bind: String,
-
-    #[arg(long)]
-    token: String,
+    bind: Option<String>,
 
     #[arg(long, value_name = "DIR")]
     codex_home: Option<PathBuf>,
@@ -128,13 +90,9 @@ pub struct ServeArgs {
     provider: ProviderArg,
 }
 
-impl ServeArgs {
-    pub fn bind(&self) -> String {
+impl CoreArgs {
+    pub fn bind(&self) -> Option<String> {
         self.bind.clone()
-    }
-
-    pub fn token(&self) -> String {
-        self.token.clone()
     }
 
     pub fn codex_home(&self) -> Option<PathBuf> {
@@ -155,12 +113,9 @@ impl ServeArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct ShareServeArgs {
-    #[arg(long, value_name = "HOST:PORT")]
-    bind: String,
-
-    #[arg(long)]
-    token: String,
+pub struct DaemonArgs {
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
 
     #[arg(long, value_name = "DIR")]
     codex_home: Option<PathBuf>,
@@ -172,13 +127,9 @@ pub struct ShareServeArgs {
     provider: ProviderArg,
 }
 
-impl ShareServeArgs {
-    pub fn bind(&self) -> String {
-        self.bind.clone()
-    }
-
-    pub fn token(&self) -> String {
-        self.token.clone()
+impl DaemonArgs {
+    pub fn socket(&self) -> Option<PathBuf> {
+        self.socket.clone().or_else(default_daemon_socket_path)
     }
 
     pub fn codex_home(&self) -> Option<PathBuf> {
@@ -196,4 +147,8 @@ impl ShareServeArgs {
     pub fn provider_filter(&self) -> ProviderFilter {
         self.provider.into()
     }
+}
+
+fn default_daemon_socket_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".config").join("coca").join("core.sock"))
 }

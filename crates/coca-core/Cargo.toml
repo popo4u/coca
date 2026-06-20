@@ -1,0 +1,18 @@
+[package]
+name = "coca-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core domain capabilities for coca."
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["clock"] }
+dirs = "6.0"
+rand = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+walkdir = "2.5"
+
+[dev-dependencies]
+tempfile = "3.14"

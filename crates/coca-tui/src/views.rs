@@ -2,10 +2,10 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
-use crate::model::{ProviderKind, Session};
-use crate::tui::formatting::{format_time, short_path};
+use coca_core::model::{ProviderKind, Session};
 
 use super::app::LaunchDialog;
+use crate::formatting::{format_time, short_path};
 
 pub(super) fn launch_dialog_height(dialog: &LaunchDialog) -> u16 {
     (dialog.options.len() as u16 + 9).max(10)

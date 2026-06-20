@@ -1,8 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::launch::{build_launch_target, default_resume_target, launch_options, LaunchMode};
-use crate::settings::save_settings;
-use crate::share::build_share_url;
+use coca_core::frontend::{
+    default_resume_for_session, launch_options_with_defaults, prepare_launch,
+    save_settings_change_owned, share_url_for_session,
+};
+use coca_core::launch::LaunchMode;
 
 use super::app::{
     session_key, Action, App, ConfigEdit, ConfigItem, ConfigPage, HelpPage, LaunchDialog,
@@ -150,14 +152,12 @@ impl App {
             }
             KeyCode::Enter => {
                 let session = self.selected_session()?;
-                if session.is_local() {
-                    Some(Action::Resume(default_resume_target(session)))
-                } else {
-                    let origin = session.origin.to_string();
-                    self.status_message = Some(format!(
-                        "Remote sessions are browse-only in this version: {origin}"
-                    ));
-                    None
+                match default_resume_for_session(session) {
+                    Ok(target) => Some(Action::Resume(target)),
+                    Err(err) => {
+                        self.status_message = Some(err.message());
+                        None
+                    }
                 }
             }
             _ => None,
@@ -194,12 +194,13 @@ impl App {
             KeyCode::Enter => {
                 let dialog = self.launch_dialog.take()?;
                 let session = self.session_by_key(&dialog.session)?;
-                Some(Action::Resume(build_launch_target(
-                    session,
-                    dialog.mode,
-                    &self.current_cwd,
-                    &dialog.options,
-                )))
+                match prepare_launch(session, dialog.mode, &self.current_cwd, &dialog.options) {
+                    Ok(target) => Some(Action::Resume(target)),
+                    Err(err) => {
+                        self.status_message = Some(err.message());
+                        None
+                    }
+                }
             }
             _ => None,
         }
@@ -280,18 +281,19 @@ impl App {
         let Some(session) = self.selected_session() else {
             return;
         };
-        if !session.is_local() {
-            let origin = session.origin.to_string();
-            self.status_message = Some(format!(
-                "Remote sessions are browse-only in this version: {origin}"
-            ));
-            return;
-        }
+        let options =
+            match launch_options_with_defaults(&self.settings, session, mode, &self.current_cwd) {
+                Ok(options) => options,
+                Err(err) => {
+                    self.status_message = Some(err.message());
+                    return;
+                }
+            };
         self.launch_dialog = Some(LaunchDialog {
             session: session_key(session),
             mode,
             selected_option: 0,
-            options: self.launch_options_with_defaults(session, mode),
+            options,
         });
     }
 
@@ -299,40 +301,18 @@ impl App {
         let Some(session) = self.selected_session() else {
             return;
         };
-        if !session.is_local() {
-            let origin = session.origin.to_string();
-            self.status_message = Some(format!(
-                "Remote sessions cannot be shared from this machine in v0: {origin}"
-            ));
-            return;
-        }
-
-        let base_url = self.settings.share.base_url.trim();
-        let token = self.settings.share.token.trim();
-        if base_url.is_empty() || token.is_empty() {
-            self.status_message = Some(
-                "Configure share.base_url and share.token in settings.json to generate share URLs."
-                    .to_string(),
-            );
-            return;
-        }
+        let url = match share_url_for_session(&self.settings, session) {
+            Ok(url) => url,
+            Err(err) => {
+                self.status_message = Some(err.message());
+                return;
+            }
+        };
 
         self.share_dialog = Some(ShareDialog {
             session: session_key(session),
-            url: build_share_url(base_url, token, session),
+            url,
         });
-    }
-
-    fn launch_options_with_defaults(
-        &self,
-        session: &crate::model::Session,
-        mode: LaunchMode,
-    ) -> Vec<crate::launch::LaunchOption> {
-        let mut options = launch_options(session, &self.current_cwd);
-        for option in &mut options {
-            option.enabled = self.settings.launch_default(mode, option.kind);
-        }
-        options
     }
 
     fn toggle_selected_config_item(&mut self) {
@@ -366,18 +346,19 @@ impl App {
                 let enabled = !self.settings.launch_default(mode, kind);
                 self.settings.set_launch_default(mode, kind, enabled);
             }
-            ConfigItem::ShareBaseUrl | ConfigItem::ShareToken => {
+            ConfigItem::CoreBind | ConfigItem::ShareBaseUrl | ConfigItem::ShareToken => {
                 self.open_config_edit(item);
                 return;
             }
         }
 
         self.clamp_config_selection();
-        self.save_settings_from_tui();
+        self.save_settings_from_tui(None);
     }
 
     fn open_config_edit(&mut self, item: ConfigItem) {
         let input = match &item {
+            ConfigItem::CoreBind => self.settings.core.bind.clone(),
             ConfigItem::ShareBaseUrl => self.settings.share.base_url.clone(),
             ConfigItem::ShareToken => self.settings.share.token.clone(),
             ConfigItem::OriginLocal
@@ -392,7 +373,14 @@ impl App {
             return;
         };
 
+        let restart_core = matches!(
+            &edit.item,
+            ConfigItem::CoreBind | ConfigItem::ShareBaseUrl | ConfigItem::ShareToken
+        );
         match edit.item {
+            ConfigItem::CoreBind => {
+                self.settings.core.bind = edit.input.trim().to_string();
+            }
             ConfigItem::ShareBaseUrl => {
                 self.settings.share.base_url = edit.input.trim().to_string();
             }
@@ -404,26 +392,28 @@ impl App {
             | ConfigItem::LaunchDefault { .. } => {}
         }
 
-        self.save_settings_from_tui();
+        self.settings.ensure_defaults();
+        let success_message = restart_core
+            .then(|| "Settings saved. Restart coca core for changes to take effect.".to_string());
+        self.save_settings_from_tui(success_message);
     }
 
     fn has_remote_sessions(&self, name: &str) -> bool {
         self.sessions.iter().any(|session| {
             matches!(
                 &session.origin,
-                crate::model::SessionOrigin::Remote(remote_name) if remote_name == name
+                coca_core::model::SessionOrigin::Remote(remote_name) if remote_name == name
             )
         })
     }
 
-    fn save_settings_from_tui(&mut self) {
-        let Some(path) = self.settings_path.clone() else {
-            self.status_message = Some("Settings updated for this run only.".to_string());
-            return;
-        };
-
-        match save_settings(&path, &self.settings) {
-            Ok(()) => {
+    fn save_settings_from_tui(&mut self, success_message: Option<String>) {
+        match save_settings_change_owned(
+            self.settings_path.clone(),
+            &self.settings,
+            success_message,
+        ) {
+            Ok(message) => {
                 if self.status_message.is_none()
                     || !self
                         .status_message
@@ -431,12 +421,11 @@ impl App {
                         .unwrap_or_default()
                         .starts_with("Settings saved. Restart")
                 {
-                    self.status_message =
-                        Some(format!("Settings saved to {}", path.to_string_lossy()));
+                    self.status_message = Some(message);
                 }
             }
             Err(err) => {
-                self.status_message = Some(format!("Failed to save settings: {err:#}"));
+                self.status_message = Some(err.message());
             }
         }
     }

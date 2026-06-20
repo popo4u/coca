@@ -10,10 +10,10 @@ It lets you browse, inspect, resume, and fork conversations created by tools lik
 - Filters by provider and searches across session text.
 - Shows session metadata and the full first prompt inline.
 - Opens a transcript viewer for reconstructed conversation history.
-- Shows a read-only Web share URL for local sessions when configured.
+- Shows a read-only Web share URL for local sessions.
 - Resumes existing sessions with the right provider command.
 - Forks or executes sessions with provider-specific launch options.
-- Fetches remote sessions through a read-only JSON-RPC/TCP client.
+- Fetches remote sessions through a read-only HTTP core.
 - Keeps provider history read-only.
 
 ## Why
@@ -53,10 +53,13 @@ By default `coca` reads and writes settings at `~/.config/coca/settings.json`:
 
 ```json
 {
+  "core": {
+    "bind": "0.0.0.0:8787"
+  },
   "remotes": [
     {
       "name": "work-mac",
-      "addr": "192.168.1.20:8765",
+      "base_url": "http://192.168.1.20:8787",
       "token": "<secret>",
       "enabled": true
     }
@@ -78,17 +81,28 @@ By default `coca` reads and writes settings at `~/.config/coca/settings.json`:
 }
 ```
 
-Press `,` in the TUI to toggle visible origins and the default launch options used by `s` execute and `f` fork dialogs. If `settings.json` does not exist, `coca` will still read an existing `~/.config/coca/remotes.json` for compatibility.
+`share.token` is generated automatically when settings are first created or loaded without a token. Press `,` in the TUI to edit visible origins, `core.bind`, share settings, and the default launch options used by `s` execute and `f` fork dialogs. If `settings.json` does not exist, `coca` will still read an existing `~/.config/coca/remotes.json` for compatibility.
 
-## Read-Only Web Sharing
+## Core
 
-Run a read-only HTTP server on a machine that has Codex or Claude history:
+Run a read-only core on a machine that has Codex or Claude history:
 
 ```sh
-coca share serve --bind 0.0.0.0:8787 --token <secret>
+coca core
 ```
 
-Open settings with `,`, edit `share.base_url` and `share.token`, then press `u` on a local session in the TUI to show its browser URL:
+The core listens on `core.bind` and serves both the remote session API and browser share pages. The default bind is `0.0.0.0:8787`; the default share URL is `http://127.0.0.1:8787`. To share across a LAN, open settings with `,` and set `share.base_url` to the machine's reachable address, then restart `coca core`.
+
+Run the local JSON-RPC daemon for frontend/core IPC:
+
+```sh
+coca daemon
+coca daemon --socket ~/.config/coca/core.sock
+```
+
+The daemon uses the same core capabilities as the TUI and is the local IPC boundary intended for future GUI integration.
+
+Press `u` on a local session in the TUI to show its browser URL:
 
 ```text
 http://192.168.1.20:8787/s/codex/<session-id>?token=<secret>
@@ -96,20 +110,12 @@ http://192.168.1.20:8787/s/codex/<session-id>?token=<secret>
 
 Shared sessions are browse-only and expose metadata plus the reconstructed transcript. The Web page does not include source paths or resume/fork commands. Anyone with the URL, token, and network access can read the session, so use a strong token and bind only to networks you trust.
 
-## Remote Clients
-
-Run a read-only RPC server on a machine that has Codex or Claude history:
-
-```sh
-coca client serve --bind 0.0.0.0:8765 --token <secret>
-```
-
 Configure the browsing machine with `~/.config/coca/settings.json`:
 
 ```json
 {
   "remotes": [
-    { "name": "work-mac", "addr": "192.168.1.20:8765", "token": "<secret>", "enabled": true }
+    { "name": "work-mac", "base_url": "http://192.168.1.20:8787", "token": "<secret>", "enabled": true }
   ]
 }
 ```
@@ -146,13 +152,14 @@ Development setup, local run commands, verification, and release build commands 
 
 ## Project Shape
 
-The codebase keeps the main responsibilities separated:
+The codebase is a Rust workspace that keeps the main responsibilities separated:
 
-- `model`: shared normalized session types
-- `providers`: read-only provider history parsing
-- `launch`: provider-specific resume and fork command construction
-- `process`: platform-aware process execution
-- `tui`: app state, events, rendering, and view helpers
+- `coca-core`: shared models, provider parsing, session catalog, settings, share, remote loading, and launch planning
+- `coca-protocol`: JSON-RPC wire contract for frontends and core
+- `coca-ipc`: local IPC framing and transport helpers
+- `coca-daemon`: core host and server/RPC adapters
+- `coca-tui`: terminal UI state, events, rendering, and view helpers
+- root `coca`: CLI shell and platform-aware process execution bridge
 - `xtask`: project automation for verification and builds
 
 ## Status

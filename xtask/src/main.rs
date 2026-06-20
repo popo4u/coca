@@ -27,14 +27,28 @@ fn run() -> Result<(), String> {
 
     match command.as_str() {
         "help" | "-h" | "--help" => print_help(),
-        "fmt" => cargo(["fmt"])?,
-        "check" => cargo(["check"])?,
-        "test" => cargo(["test"])?,
-        "clippy" => cargo(["clippy", "--all-targets", "--", "-D", "warnings"])?,
+        "fmt" => cargo(["fmt", "--all"])?,
+        "check" => cargo(["check", "--workspace"])?,
+        "test" => cargo(["test", "--workspace"])?,
+        "clippy" => cargo([
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ])?,
         "verify" => {
-            cargo(["fmt", "--check"])?;
-            cargo(["test"])?;
-            cargo(["clippy", "--all-targets", "--", "-D", "warnings"])?;
+            cargo(["fmt", "--all", "--check"])?;
+            cargo(["test", "--workspace"])?;
+            cargo([
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ])?;
         }
         "build" => {
             let Some(options) = BuildOptions::parse(args.collect())? else {
@@ -526,10 +540,10 @@ fn print_help() {
 cargo xtask <command>
 
 Commands:
-  fmt                         Run cargo fmt
-  check                       Run cargo check
-  test                        Run cargo test
-  clippy                      Run cargo clippy --all-targets -- -D warnings
+  fmt                         Run cargo fmt --all
+  check                       Run cargo check --workspace
+  test                        Run cargo test --workspace
+  clippy                      Run cargo clippy --workspace --all-targets -- -D warnings
   verify                      Run fmt --check, test, and clippy
   build [--release] [--target TARGET]
                               Build the app

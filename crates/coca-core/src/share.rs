@@ -1,49 +1,8 @@
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::thread;
-
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Local};
 
-use crate::model::{ChatMessage, ProviderFilter, ProviderKind, Session};
-use crate::providers;
-
-#[derive(Clone, Debug)]
-pub struct ShareServeOptions {
-    pub bind: String,
-    pub token: String,
-    pub codex_home: Option<PathBuf>,
-    pub claude_home: Option<PathBuf>,
-    pub provider_filter: ProviderFilter,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct HttpResponse {
-    status: u16,
-    reason: &'static str,
-    content_type: &'static str,
-    body: String,
-}
-
-pub fn serve(options: ShareServeOptions) -> Result<()> {
-    if options.token.trim().is_empty() {
-        anyhow::bail!("--token must not be empty");
-    }
-
-    let listener = TcpListener::bind(options.bind.trim())
-        .with_context(|| format!("failed to bind {}", options.bind))?;
-    for stream in listener.incoming() {
-        let stream = stream.context("failed to accept share connection")?;
-        let options = options.clone();
-        thread::spawn(move || {
-            if let Err(err) = handle_stream(stream, options) {
-                eprintln!("coca share connection failed: {err:#}");
-            }
-        });
-    }
-    Ok(())
-}
+use crate::http::{simple_response, HttpResponse};
+use crate::model::{ChatMessage, ProviderKind, Session};
 
 pub fn build_share_url(base_url: &str, token: &str, session: &Session) -> String {
     format!(
@@ -55,81 +14,25 @@ pub fn build_share_url(base_url: &str, token: &str, session: &Session) -> String
     )
 }
 
-fn handle_stream(mut stream: TcpStream, options: ShareServeOptions) -> Result<()> {
-    let reader_stream = stream
-        .try_clone()
-        .context("failed to clone share stream for reading")?;
-    let mut reader = BufReader::new(reader_stream);
-    let request = read_http_request(&mut reader)?;
-    let response = match request {
-        Some((method, target)) => {
-            let sessions = providers::load_sessions(
-                options.codex_home.as_deref(),
-                options.claude_home.as_deref(),
-                options.provider_filter,
-            )
-            .unwrap_or_default();
-            route_request(&method, &target, options.token.trim(), &sessions)
-        }
-        None => simple_response(400, "Bad Request", "Malformed request"),
-    };
-    write_http_response(&mut stream, &response)
-}
-
-fn read_http_request(reader: &mut impl BufRead) -> Result<Option<(String, String)>> {
-    let mut line = String::new();
-    if reader
-        .read_line(&mut line)
-        .context("failed to read HTTP request line")?
-        == 0
-    {
-        return Ok(None);
-    }
-
-    let mut parts = line.split_whitespace();
-    let Some(method) = parts.next().map(str::to_string) else {
-        return Ok(None);
-    };
-    let Some(target) = parts.next().map(str::to_string) else {
-        return Ok(None);
-    };
-
-    loop {
-        line.clear();
-        if reader
-            .read_line(&mut line)
-            .context("failed to read HTTP headers")?
-            == 0
-        {
-            break;
-        }
-        if line == "\r\n" || line == "\n" {
-            break;
-        }
-    }
-
-    Ok(Some((method, target)))
-}
-
-fn write_http_response(writer: &mut impl Write, response: &HttpResponse) -> Result<()> {
-    write!(
-        writer,
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{}",
-        response.status,
-        response.reason,
-        response.content_type,
-        response.body.len(),
-        response.body
-    )
-    .context("failed to write HTTP response")
-}
-
-fn route_request(
+#[cfg(test)]
+pub(crate) fn route_request(
     method: &str,
     target: &str,
     expected_token: &str,
     sessions: &[Session],
 ) -> HttpResponse {
+    route_request_with_loader(method, target, expected_token, || sessions.to_vec())
+}
+
+pub(crate) fn route_request_with_loader<F>(
+    method: &str,
+    target: &str,
+    expected_token: &str,
+    load_sessions: F,
+) -> HttpResponse
+where
+    F: FnOnce() -> Vec<Session>,
+{
     let include_body = match method {
         "GET" => true,
         "HEAD" => false,
@@ -148,6 +51,7 @@ fn route_request(
         return simple_response(404, "Not Found", "Not found");
     };
 
+    let sessions = load_sessions();
     let Some(session) = sessions
         .iter()
         .find(|session| session.provider == provider && session.id == route.session_id)
@@ -160,12 +64,7 @@ fn route_request(
     } else {
         String::new()
     };
-    HttpResponse {
-        status: 200,
-        reason: "OK",
-        content_type: "text/html; charset=utf-8",
-        body,
-    }
+    HttpResponse::new(200, "OK", "text/html; charset=utf-8", body)
 }
 
 struct ShareRoute {
@@ -212,7 +111,7 @@ fn provider_from_path(provider: &str) -> Option<ProviderKind> {
     }
 }
 
-fn render_session_html(session: &Session) -> String {
+pub(crate) fn render_session_html(session: &Session) -> String {
     let transcript = render_transcript(session);
     let first_prompt = transcript
         .first_prompt
@@ -582,7 +481,7 @@ h1 {{
 <body>
 <header class="topbar">
   <div class="brand">
-    <strong>coca share</strong>
+    <strong>coca core</strong>
     <span>{id}</span>
   </div>
   <div class="status"><span class="dot"></span><span>read-only session</span></div>
@@ -878,15 +777,6 @@ fn render_text(text: &str) -> String {
     }
 }
 
-fn simple_response(status: u16, reason: &'static str, message: &str) -> HttpResponse {
-    HttpResponse {
-        status,
-        reason,
-        content_type: "text/plain; charset=utf-8",
-        body: message.to_string(),
-    }
-}
-
 fn format_time(timestamp_ms: Option<i64>) -> String {
     let Some(timestamp_ms) = timestamp_ms else {
         return "-".to_string();
@@ -1077,6 +967,15 @@ mod tests {
             route_request("GET", "/s/codex/sid?token=bad", "secret", &sessions).status,
             401
         );
+    }
+
+    #[test]
+    fn rejects_invalid_token_before_loading_sessions() {
+        let response = route_request_with_loader("GET", "/s/codex/sid?token=bad", "secret", || {
+            panic!("sessions should not load for invalid token")
+        });
+
+        assert_eq!(response.status, 401);
     }
 
     #[test]

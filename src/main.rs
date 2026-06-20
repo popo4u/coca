@@ -1,45 +1,42 @@
 mod cli;
-mod launch;
-mod model;
 mod process;
-mod providers;
-mod remote;
-mod settings;
-mod share;
-mod tui;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use coca_core::catalog::{load_session_catalog, SessionCatalogOptions};
+use coca_core::settings::load_settings_for_cli;
+use coca_daemon::{serve as serve_core, serve_rpc, CoreOptions, RpcDaemonOptions};
+use coca_tui::run_tui;
 
-use crate::cli::{Cli, ClientCommand, Command, ShareCommand};
+use crate::cli::{Cli, Command};
 use crate::process::exec_resume;
-use crate::providers::{load_sessions, sort_sessions};
-use crate::remote::{load_remote_sessions, serve, ServeOptions};
-use crate::settings::load_settings_for_cli;
-use crate::share::{serve as serve_share, ShareServeOptions};
-use crate::tui::run_tui;
 
 fn main() -> Result<()> {
     let cli = Cli::parse_args();
+    let (settings, settings_path) = load_settings_for_cli(cli.remote_config().as_deref())?;
     if let Some(command) = cli.command() {
         return match command {
-            Command::Client(client) => match client.command() {
-                ClientCommand::Serve(args) => serve(ServeOptions {
-                    bind: args.bind(),
-                    token: args.token(),
-                    codex_home: args.codex_home(),
-                    claude_home: args.claude_home(),
-                    provider_filter: args.provider_filter(),
-                }),
-            },
-            Command::Share(share) => match share.command() {
-                ShareCommand::Serve(args) => serve_share(ShareServeOptions {
-                    bind: args.bind(),
-                    token: args.token(),
-                    codex_home: args.codex_home(),
-                    claude_home: args.claude_home(),
-                    provider_filter: args.provider_filter(),
-                }),
-            },
+            Command::Core(args) => serve_core(CoreOptions {
+                bind: args.bind().unwrap_or_else(|| settings.core.bind.clone()),
+                token: settings.share.token.clone(),
+                codex_home: args.codex_home(),
+                claude_home: args.claude_home(),
+                provider_filter: args.provider_filter(),
+            }),
+            Command::Daemon(args) => {
+                let socket = args.socket().context(
+                    "failed to resolve daemon socket path: home directory was not found",
+                )?;
+                serve_rpc(
+                    &socket,
+                    RpcDaemonOptions {
+                        settings,
+                        settings_path: Some(settings_path),
+                        codex_home: args.codex_home(),
+                        claude_home: args.claude_home(),
+                        provider_filter: args.provider_filter(),
+                    },
+                )
+            }
         };
     }
 
@@ -47,18 +44,21 @@ fn main() -> Result<()> {
     let codex_home = cli.codex_home();
     let claude_home = cli.claude_home();
 
-    let mut sessions = load_sessions(
-        codex_home.as_deref(),
-        claude_home.as_deref(),
-        provider_filter,
-    )?;
-    let (settings, settings_path) = load_settings_for_cli(cli.remote_config().as_deref())?;
     let remote_config = settings.remote_config();
-    let (mut remote_sessions, warnings) = load_remote_sessions(&remote_config);
-    sessions.append(&mut remote_sessions);
-    sort_sessions(&mut sessions);
+    let catalog = load_session_catalog(SessionCatalogOptions {
+        codex_home,
+        claude_home,
+        provider_filter,
+        remote_config,
+    })?;
 
-    if let Some(target) = run_tui(sessions, provider_filter, warnings, settings, settings_path)? {
+    if let Some(target) = run_tui(
+        catalog.sessions,
+        provider_filter,
+        catalog.warnings,
+        settings,
+        settings_path,
+    )? {
         exec_resume(target)?;
     }
 

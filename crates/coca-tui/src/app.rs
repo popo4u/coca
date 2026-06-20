@@ -12,9 +12,9 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
-use crate::launch::{LaunchMode, LaunchOption, LaunchOptionKind, ResumeTarget};
-use crate::model::{ProviderFilter, ProviderKind, Session, SessionOrigin};
-use crate::settings::Settings;
+use coca_core::launch::{LaunchMode, LaunchOption, LaunchOptionKind, ResumeTarget};
+use coca_core::model::{ProviderFilter, ProviderKind, Session, SessionOrigin};
+use coca_core::settings::Settings;
 
 pub fn run_tui(
     sessions: Vec<Session>,
@@ -166,6 +166,7 @@ pub(super) struct HelpPage;
 pub(super) enum ConfigItem {
     OriginLocal,
     OriginRemote(String),
+    CoreBind,
     LaunchDefault {
         mode: LaunchMode,
         kind: LaunchOptionKind,
@@ -194,9 +195,10 @@ impl App {
         sessions: Vec<Session>,
         provider_filter: ProviderFilter,
         warnings: Vec<String>,
-        settings: Settings,
+        mut settings: Settings,
         settings_path: Option<PathBuf>,
     ) -> Self {
+        settings.ensure_defaults();
         let mut app = Self {
             sessions,
             filtered_indices: Vec::new(),
@@ -307,6 +309,7 @@ impl App {
         let mut items = vec![ConfigItem::OriginLocal];
         items.extend(remote_names.into_iter().map(ConfigItem::OriginRemote));
         items.extend([
+            ConfigItem::CoreBind,
             ConfigItem::ShareBaseUrl,
             ConfigItem::ShareToken,
             ConfigItem::LaunchDefault {
@@ -348,11 +351,11 @@ pub(super) fn session_key(session: &Session) -> SessionKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use crate::launch::LaunchOptionKind;
-    use crate::model::ChatMessage;
-    use crate::settings::Settings;
+    use coca_core::launch::LaunchOptionKind;
+    use coca_core::model::ChatMessage;
+    use coca_core::settings::Settings;
 
     #[test]
     fn filters_sessions_by_provider_and_query() {
@@ -485,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn u_requires_share_settings() {
+    fn u_uses_default_share_settings() {
         let mut app = App::new_with_warnings(
             vec![session(ProviderKind::Codex, "sid", "hello codex")],
             ProviderFilter::All,
@@ -494,13 +497,10 @@ mod tests {
 
         app.handle_key(KeyEvent::from(KeyCode::Char('u')));
 
-        assert!(app.share_dialog.is_none());
-        assert_eq!(
-            app.status_message.as_deref(),
-            Some(
-                "Configure share.base_url and share.token in settings.json to generate share URLs."
-            )
-        );
+        let url = app.share_dialog.as_ref().map(|dialog| dialog.url.as_str());
+        assert!(url
+            .unwrap()
+            .starts_with("http://127.0.0.1:8787/s/codex/sid?token="));
     }
 
     #[test]
@@ -726,26 +726,61 @@ mod tests {
 
         app.handle_key(KeyEvent::from(KeyCode::Char(',')));
         app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
         app.handle_key(KeyEvent::from(KeyCode::Enter));
 
         assert_eq!(
             app.config_edit,
             Some(ConfigEdit {
                 item: ConfigItem::ShareBaseUrl,
-                input: String::new()
+                input: "http://127.0.0.1:8787".to_string()
             })
         );
 
-        for ch in "http://127.0.0.1:8787".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        for ch in "http://192.168.1.20:8787".chars() {
             app.handle_key(KeyEvent::from(KeyCode::Char(ch)));
         }
         app.handle_key(KeyEvent::from(KeyCode::Enter));
 
         assert!(app.config_edit.is_none());
-        assert_eq!(app.settings.share.base_url, "http://127.0.0.1:8787");
+        assert_eq!(app.settings.share.base_url, "http://192.168.1.20:8787");
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Settings updated for this run only.")
+            Some("Settings saved. Restart coca core for changes to take effect.")
+        );
+    }
+
+    #[test]
+    fn config_page_edits_core_bind() {
+        let mut app = App::new_with_warnings(
+            vec![session(ProviderKind::Claude, "sid", "hello claude")],
+            ProviderFilter::All,
+            Vec::new(),
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(',')));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(
+            app.config_edit,
+            Some(ConfigEdit {
+                item: ConfigItem::CoreBind,
+                input: "0.0.0.0:8787".to_string()
+            })
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        for ch in "127.0.0.1:9999".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(ch)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(app.settings.core.bind, "127.0.0.1:9999");
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Settings saved. Restart coca core for changes to take effect.")
         );
     }
 
@@ -760,8 +795,10 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char(',')));
         app.handle_key(KeyEvent::from(KeyCode::Down));
         app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
         app.handle_key(KeyEvent::from(KeyCode::Enter));
 
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         for ch in "secret".chars() {
             app.handle_key(KeyEvent::from(KeyCode::Char(ch)));
         }
@@ -779,6 +816,7 @@ mod tests {
         );
 
         app.handle_key(KeyEvent::from(KeyCode::Char(',')));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
         app.handle_key(KeyEvent::from(KeyCode::Down));
         app.handle_key(KeyEvent::from(KeyCode::Down));
         app.handle_key(KeyEvent::from(KeyCode::Down));

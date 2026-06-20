@@ -6,14 +6,14 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::launch::{LaunchMode, LaunchOptionKind};
-use crate::model::{Session, SessionOrigin};
-use crate::tui::formatting::{short_id, short_path};
+use coca_core::launch::{LaunchMode, LaunchOptionKind};
+use coca_core::model::{Session, SessionOrigin};
 
 use super::app::{App, ConfigEdit, ConfigItem, ConfigPage, HelpPage, LaunchDialog, ShareDialog};
 use super::views::{
     centered_rect, centered_rect_fixed_height, launch_dialog_height, session_lines, transcript_text,
 };
+use crate::formatting::{short_id, short_path};
 
 impl App {
     pub(super) fn render(&mut self, frame: &mut Frame<'_>) {
@@ -353,9 +353,21 @@ impl App {
             Line::raw(""),
         ];
 
+        let mut core_header_added = false;
         let mut share_header_added = false;
         let mut defaults_header_added = false;
         for (idx, item) in items.iter().enumerate() {
+            if matches!(item, ConfigItem::CoreBind) && !core_header_added {
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    "Core",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                lines.push(Line::raw(""));
+                core_header_added = true;
+            }
             if matches!(item, ConfigItem::ShareBaseUrl | ConfigItem::ShareToken)
                 && !share_header_added
             {
@@ -450,6 +462,7 @@ impl App {
         match item {
             ConfigItem::OriginLocal => self.settings.origin_visible(&SessionOrigin::Local),
             ConfigItem::OriginRemote(name) => self.settings.remote_enabled(name),
+            ConfigItem::CoreBind => false,
             ConfigItem::LaunchDefault { mode, kind } => self.settings.launch_default(*mode, *kind),
             ConfigItem::ShareBaseUrl | ConfigItem::ShareToken => false,
         }
@@ -459,6 +472,7 @@ impl App {
         match item {
             ConfigItem::OriginLocal => "origin local".to_string(),
             ConfigItem::OriginRemote(name) => format!("origin {name}"),
+            ConfigItem::CoreBind => format!("core bind: {}", self.settings.core.bind),
             ConfigItem::ShareBaseUrl => format!(
                 "share base URL: {}",
                 display_setting_value(&self.settings.share.base_url)
@@ -487,6 +501,7 @@ impl App {
 
     fn config_edit_title(&self, item: &ConfigItem) -> &'static str {
         match item {
+            ConfigItem::CoreBind => "core.bind",
             ConfigItem::ShareBaseUrl => "share.base_url",
             ConfigItem::ShareToken => "share.token",
             ConfigItem::OriginLocal
@@ -497,8 +512,9 @@ impl App {
 
     fn config_edit_hint(&self, item: &ConfigItem) -> &'static str {
         match item {
+            ConfigItem::CoreBind => "Example: 0.0.0.0:8787",
             ConfigItem::ShareBaseUrl => "Example: http://192.168.1.20:8787",
-            ConfigItem::ShareToken => "Use the same token passed to coca share serve.",
+            ConfigItem::ShareToken => "Used by coca core for API and share links.",
             ConfigItem::OriginLocal
             | ConfigItem::OriginRemote(_)
             | ConfigItem::LaunchDefault { .. } => "",

@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 
 use crate::launch::{LaunchMode, LaunchOptionKind};
@@ -11,6 +12,8 @@ use crate::remote::{load_remote_config, RemoteConfig, RemoteEndpoint};
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub core: CoreSettings,
     #[serde(default)]
     pub remotes: Vec<ConfiguredRemote>,
     #[serde(default)]
@@ -32,14 +35,40 @@ impl Settings {
             if !names.insert(name.to_string()) {
                 anyhow::bail!("duplicate remote name: {name}");
             }
-            if remote.addr.trim().is_empty() {
-                anyhow::bail!("remote {name} addr must not be empty");
+            if remote.base_url.trim().is_empty() {
+                anyhow::bail!("remote {name} base_url must not be empty");
             }
             if remote.token.trim().is_empty() {
                 anyhow::bail!("remote {name} token must not be empty");
             }
         }
+        if self.core.bind.trim().is_empty() {
+            anyhow::bail!("core bind must not be empty");
+        }
+        if self.share.base_url.trim().is_empty() {
+            anyhow::bail!("share base_url must not be empty");
+        }
+        if self.share.token.trim().is_empty() {
+            anyhow::bail!("share token must not be empty");
+        }
         Ok(())
+    }
+
+    pub fn ensure_defaults(&mut self) -> bool {
+        let mut changed = false;
+        if self.core.bind.trim().is_empty() {
+            self.core.bind = default_core_bind();
+            changed = true;
+        }
+        if self.share.base_url.trim().is_empty() {
+            self.share.base_url = default_share_base_url();
+            changed = true;
+        }
+        if self.share.token.trim().is_empty() {
+            self.share.token = generate_token();
+            changed = true;
+        }
+        changed
     }
 
     pub fn remote_config(&self) -> RemoteConfig {
@@ -50,7 +79,7 @@ impl Settings {
                 .filter(|remote| remote.enabled)
                 .map(|remote| RemoteEndpoint {
                     name: remote.name.clone(),
-                    addr: remote.addr.clone(),
+                    base_url: remote.base_url.clone(),
                     token: remote.token.clone(),
                 })
                 .collect(),
@@ -104,28 +133,80 @@ impl Settings {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CoreSettings {
+    #[serde(default = "default_core_bind")]
+    pub bind: String,
+}
+
+impl Default for CoreSettings {
+    fn default() -> Self {
+        Self {
+            bind: default_core_bind(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ShareSettings {
-    #[serde(default)]
+    #[serde(default = "default_share_base_url")]
     pub base_url: String,
     #[serde(default)]
     pub token: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+impl Default for ShareSettings {
+    fn default() -> Self {
+        Self {
+            base_url: default_share_base_url(),
+            token: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ConfiguredRemote {
     pub name: String,
-    pub addr: String,
+    pub base_url: String,
     pub token: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfiguredRemoteWire {
+    name: String,
+    base_url: Option<String>,
+    addr: Option<String>,
+    token: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+impl<'de> Deserialize<'de> for ConfiguredRemote {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ConfiguredRemoteWire::deserialize(deserializer)?;
+        let base_url = wire
+            .base_url
+            .or_else(|| wire.addr.map(normalize_legacy_addr))
+            .unwrap_or_default();
+        Ok(Self {
+            name: wire.name,
+            base_url,
+            token: wire.token,
+            enabled: wire.enabled,
+        })
+    }
 }
 
 impl From<RemoteEndpoint> for ConfiguredRemote {
     fn from(remote: RemoteEndpoint) -> Self {
         Self {
             name: remote.name,
-            addr: remote.addr,
+            base_url: remote.base_url,
             token: remote.token,
             enabled: true,
         }
@@ -208,11 +289,18 @@ fn legacy_remote_config_path() -> Option<PathBuf> {
 pub fn load_settings_for_cli(remote_config_path: Option<&Path>) -> Result<(Settings, PathBuf)> {
     let path = default_settings_path()
         .context("failed to resolve default settings path: home directory was not found")?;
-    let mut settings = if path.exists() {
-        load_settings(&path)?
+    let path_exists = path.exists();
+    let mut settings = if path_exists {
+        load_settings_raw(&path)?
     } else {
         load_legacy_settings().unwrap_or_default()
     };
+
+    let changed = settings.ensure_defaults() || !path_exists;
+    settings.validate()?;
+    if changed {
+        save_settings(&path, &settings)?;
+    }
 
     if let Some(remote_config_path) = remote_config_path {
         settings.remotes = load_remote_config(remote_config_path)?
@@ -226,23 +314,32 @@ pub fn load_settings_for_cli(remote_config_path: Option<&Path>) -> Result<(Setti
     Ok((settings, path))
 }
 
-pub fn load_settings(path: &Path) -> Result<Settings> {
-    let contents = fs::read_to_string(path)
-        .with_context(|| format!("failed to read settings {}", path.display()))?;
-    let settings: Settings = serde_json::from_str(&contents)
-        .with_context(|| format!("failed to parse settings {}", path.display()))?;
+#[cfg(test)]
+fn load_settings(path: &Path) -> Result<Settings> {
+    let mut settings = load_settings_raw(path)?;
+    settings.ensure_defaults();
     settings.validate()?;
     Ok(settings)
 }
 
+fn load_settings_raw(path: &Path) -> Result<Settings> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read settings {}", path.display()))?;
+    let settings: Settings = serde_json::from_str(&contents)
+        .with_context(|| format!("failed to parse settings {}", path.display()))?;
+    Ok(settings)
+}
+
 pub fn save_settings(path: &Path, settings: &Settings) -> Result<()> {
+    let mut settings = settings.clone();
+    settings.ensure_defaults();
     settings.validate()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create settings directory {}", parent.display()))?;
     }
     let contents =
-        serde_json::to_string_pretty(settings).context("failed to serialize settings")?;
+        serde_json::to_string_pretty(&settings).context("failed to serialize settings")?;
     fs::write(path, format!("{contents}\n"))
         .with_context(|| format!("failed to write settings {}", path.display()))
 }
@@ -267,6 +364,34 @@ fn default_true() -> bool {
     true
 }
 
+fn default_core_bind() -> String {
+    "0.0.0.0:8787".to_string()
+}
+
+fn default_share_base_url() -> String {
+    "http://127.0.0.1:8787".to_string()
+}
+
+fn normalize_legacy_addr(addr: String) -> String {
+    if addr.starts_with("http://") || addr.starts_with("https://") {
+        addr
+    } else {
+        format!("http://{addr}")
+    }
+}
+
+fn generate_token() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let mut token = String::with_capacity(bytes.len() * 2);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        token.push(HEX[(byte >> 4) as usize] as char);
+        token.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    token
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,7 +401,7 @@ mod tests {
         let settings: Settings = serde_json::from_str(
             r#"{
                 "remotes": [
-                    { "name": "work", "addr": "127.0.0.1:8765", "token": "secret" }
+                    { "name": "work", "base_url": "http://127.0.0.1:8787", "token": "secret" }
                 ],
                 "launch_defaults": {
                     "resume": { "yolo": true },
@@ -291,6 +416,7 @@ mod tests {
         .unwrap();
 
         assert!(settings.remotes[0].enabled);
+        assert_eq!(settings.core.bind, "0.0.0.0:8787");
         assert!(settings.origin_visible(&SessionOrigin::Local));
         assert!(settings.launch_default(LaunchMode::Resume, LaunchOptionKind::Yolo));
         assert!(settings.launch_default(LaunchMode::Fork, LaunchOptionKind::UseCurrentDir));
@@ -299,12 +425,29 @@ mod tests {
     }
 
     #[test]
+    fn ensure_defaults_generates_share_token() {
+        let mut settings = Settings::default();
+
+        assert!(settings.share.token.is_empty());
+        assert!(settings.ensure_defaults());
+
+        assert_eq!(settings.core.bind, "0.0.0.0:8787");
+        assert_eq!(settings.share.base_url, "http://127.0.0.1:8787");
+        assert_eq!(settings.share.token.len(), 64);
+        assert!(settings
+            .share
+            .token
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
     fn filters_disabled_remotes_from_remote_config() {
         let settings: Settings = serde_json::from_str(
             r#"{
                 "remotes": [
-                    { "name": "enabled", "addr": "127.0.0.1:1", "token": "secret" },
-                    { "name": "disabled", "addr": "127.0.0.1:2", "token": "secret", "enabled": false }
+                    { "name": "enabled", "base_url": "http://127.0.0.1:1", "token": "secret" },
+                    { "name": "disabled", "base_url": "http://127.0.0.1:2", "token": "secret", "enabled": false }
                 ]
             }"#,
         )
@@ -323,11 +466,12 @@ mod tests {
         let mut settings = Settings::default();
         settings.remotes.push(ConfiguredRemote {
             name: "work".to_string(),
-            addr: "127.0.0.1:8765".to_string(),
+            base_url: "http://127.0.0.1:8787".to_string(),
             token: "secret".to_string(),
             enabled: false,
         });
         settings.set_launch_default(LaunchMode::Fork, LaunchOptionKind::Yolo, true);
+        settings.ensure_defaults();
 
         save_settings(&path, &settings).unwrap();
         let loaded = load_settings(&path).unwrap();

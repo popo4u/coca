@@ -1,0 +1,13 @@
+[package]
+name = "coca-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal UI frontend for coca."
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["clock"] }
+coca-core = { path = "../coca-core" }
+crossterm = "0.29"
+dirs = "6.0"
+ratatui = "0.30.1"
