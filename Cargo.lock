@@ -270,6 +270,7 @@ dependencies = [
  "clap",
  "coca-core",
  "coca-daemon",
+ "coca-protocol",
  "coca-tui",
  "dirs",
  "tempfile",

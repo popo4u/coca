@@ -1,13 +1,14 @@
 mod cli;
+mod core_client;
 mod process;
 
 use anyhow::{Context, Result};
-use coca_core::catalog::{load_session_catalog, SessionCatalogOptions};
 use coca_core::settings::load_settings_for_cli;
 use coca_daemon::{serve as serve_core, serve_rpc, CoreOptions, RpcDaemonOptions};
 use coca_tui::run_tui;
 
 use crate::cli::{Cli, Command};
+use crate::core_client::RpcCoreClient;
 use crate::process::exec_resume;
 
 fn main() -> Result<()> {
@@ -41,24 +42,15 @@ fn main() -> Result<()> {
     }
 
     let provider_filter = cli.provider_filter();
-    let codex_home = cli.codex_home();
-    let claude_home = cli.claude_home();
-
-    let remote_config = settings.remote_config();
-    let catalog = load_session_catalog(SessionCatalogOptions {
-        codex_home,
-        claude_home,
-        provider_filter,
-        remote_config,
-    })?;
-
-    if let Some(target) = run_tui(
-        catalog.sessions,
-        provider_filter,
-        catalog.warnings,
+    let core_client = RpcCoreClient::new(RpcDaemonOptions {
         settings,
-        settings_path,
-    )? {
+        settings_path: Some(settings_path),
+        codex_home: cli.codex_home(),
+        claude_home: cli.claude_home(),
+        provider_filter,
+    });
+
+    if let Some(target) = run_tui(Box::new(core_client), provider_filter)? {
         exec_resume(target)?;
     }
 

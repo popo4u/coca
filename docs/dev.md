@@ -65,6 +65,8 @@ cargo run -- daemon
 cargo run -- daemon --socket ~/.config/coca/core.sock
 ```
 
+The default TUI path also uses the JSON-RPC core router through an in-process client, so UI code follows the same boundary that the local daemon exposes over a socket.
+
 In the TUI, press `,` to edit `core.bind`, `share.base_url`, and `share.token`, then press `u` on a local session to show its share URL. Restart `coca core` after changing core or share settings used by the running server.
 
 Show CLI help:
@@ -184,8 +186,8 @@ The workspace is organized by responsibility:
 - `crates/coca-protocol/`: JSON-RPC wire types for frontend/core communication.
 - `crates/coca-ipc/`: local IPC framing and transport helpers.
 - `crates/coca-daemon/`: core host, RPC router, and server adapters.
-- `crates/coca-tui/`: app state, key handling, rendering, and view helpers.
-- `src/`: root CLI shell and final process execution bridge.
+- `crates/coca-tui/`: app state, key handling, rendering, view helpers, and the frontend `CoreClient` contract.
+- `src/`: root CLI shell, frontend RPC client adapter, and final process execution bridge.
 - `xtask/`: project automation.
 
 When adding a provider:

@@ -102,6 +102,8 @@ coca daemon --socket ~/.config/coca/core.sock
 
 The daemon uses the same core capabilities as the TUI and is the local IPC boundary intended for future GUI integration.
 
+The default TUI path uses the same JSON-RPC core router through an in-process client, so terminal UI behavior and daemon behavior stay on the same frontend/core boundary.
+
 Press `u` on a local session in the TUI to show its browser URL:
 
 ```text
@@ -158,8 +160,8 @@ The codebase is a Rust workspace that keeps the main responsibilities separated:
 - `coca-protocol`: JSON-RPC wire contract for frontends and core
 - `coca-ipc`: local IPC framing and transport helpers
 - `coca-daemon`: core host and server/RPC adapters
-- `coca-tui`: terminal UI state, events, rendering, and view helpers
-- root `coca`: CLI shell and platform-aware process execution bridge
+- `coca-tui`: terminal UI state, events, rendering, view helpers, and the frontend `CoreClient` contract
+- root `coca`: CLI shell, frontend RPC client adapter, and platform-aware process execution bridge
 - `xtask`: project automation for verification and builds
 
 ## Status

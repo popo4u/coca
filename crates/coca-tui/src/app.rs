@@ -16,13 +16,25 @@ use coca_core::launch::{LaunchMode, LaunchOption, LaunchOptionKind, ResumeTarget
 use coca_core::model::{ProviderFilter, ProviderKind, Session, SessionOrigin};
 use coca_core::settings::Settings;
 
+use crate::core_client::CoreClient;
+#[cfg(test)]
+use crate::core_client::SettingsUpdate;
+#[cfg(test)]
+use anyhow::anyhow;
+#[cfg(test)]
+use coca_core::catalog::SessionCatalog;
+#[cfg(test)]
+use coca_core::frontend::{
+    default_resume_for_session, launch_options_with_defaults, prepare_launch, share_url_for_session,
+};
+
 pub fn run_tui(
-    sessions: Vec<Session>,
+    mut core_client: Box<dyn CoreClient>,
     initial_filter: ProviderFilter,
-    warnings: Vec<String>,
-    settings: Settings,
-    settings_path: PathBuf,
 ) -> Result<Option<ResumeTarget>> {
+    let settings = core_client.settings()?;
+    let catalog = core_client.session_catalog()?;
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -32,11 +44,11 @@ pub fn run_tui(
     let mut guard = TerminalGuard { restored: false };
     let result = run_loop(
         &mut terminal,
-        sessions,
+        catalog.sessions,
         initial_filter,
-        warnings,
+        catalog.warnings,
         settings,
-        settings_path,
+        core_client,
     );
     guard.restore()?;
     result
@@ -74,15 +86,9 @@ fn run_loop(
     initial_filter: ProviderFilter,
     warnings: Vec<String>,
     settings: Settings,
-    settings_path: PathBuf,
+    core_client: Box<dyn CoreClient>,
 ) -> Result<Option<ResumeTarget>> {
-    let mut app = App::new_with_settings(
-        sessions,
-        initial_filter,
-        warnings,
-        settings,
-        Some(settings_path),
-    );
+    let mut app = App::new_with_settings(sessions, initial_filter, warnings, settings, core_client);
     loop {
         terminal.draw(|frame| app.render(frame))?;
         if !event::poll(Duration::from_millis(150))? {
@@ -124,7 +130,7 @@ pub(super) struct App {
     pub(super) current_cwd: PathBuf,
     pub(super) status_message: Option<String>,
     pub(super) settings: Settings,
-    pub(super) settings_path: Option<PathBuf>,
+    pub(super) core_client: Box<dyn CoreClient>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -182,12 +188,24 @@ impl App {
         provider_filter: ProviderFilter,
         warnings: Vec<String>,
     ) -> Self {
-        Self::new_with_settings(
-            sessions,
+        Self::new_with_test_settings(sessions, provider_filter, warnings, Settings::default())
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_with_test_settings(
+        sessions: Vec<Session>,
+        provider_filter: ProviderFilter,
+        warnings: Vec<String>,
+        settings: Settings,
+    ) -> Self {
+        let mut client_settings = settings.clone();
+        client_settings.ensure_defaults();
+        Self::new_with_settings_and_client(
+            sessions.clone(),
             provider_filter,
             warnings,
-            Settings::default(),
-            None,
+            settings.clone(),
+            Box::new(TestCoreClient::new(sessions, client_settings, false)),
         )
     }
 
@@ -195,8 +213,24 @@ impl App {
         sessions: Vec<Session>,
         provider_filter: ProviderFilter,
         warnings: Vec<String>,
+        settings: Settings,
+        core_client: Box<dyn CoreClient>,
+    ) -> Self {
+        Self::new_with_settings_and_client(
+            sessions,
+            provider_filter,
+            warnings,
+            settings,
+            core_client,
+        )
+    }
+
+    fn new_with_settings_and_client(
+        sessions: Vec<Session>,
+        provider_filter: ProviderFilter,
+        warnings: Vec<String>,
         mut settings: Settings,
-        settings_path: Option<PathBuf>,
+        core_client: Box<dyn CoreClient>,
     ) -> Self {
         settings.ensure_defaults();
         let mut app = Self {
@@ -221,7 +255,7 @@ impl App {
                 Some(format!("Remote load warnings: {}", warnings.join("; ")))
             },
             settings,
-            settings_path,
+            core_client,
         };
         app.apply_filter();
         app
@@ -349,6 +383,77 @@ pub(super) fn session_key(session: &Session) -> SessionKey {
 }
 
 #[cfg(test)]
+struct TestCoreClient {
+    sessions: Vec<Session>,
+    settings: Settings,
+    persisted: bool,
+}
+
+#[cfg(test)]
+impl TestCoreClient {
+    fn new(sessions: Vec<Session>, settings: Settings, persisted: bool) -> Self {
+        Self {
+            sessions,
+            settings,
+            persisted,
+        }
+    }
+}
+
+#[cfg(test)]
+impl CoreClient for TestCoreClient {
+    fn session_catalog(&mut self) -> Result<SessionCatalog> {
+        Ok(SessionCatalog {
+            sessions: self.sessions.clone(),
+            warnings: Vec::new(),
+        })
+    }
+
+    fn settings(&mut self) -> Result<Settings> {
+        Ok(self.settings.clone())
+    }
+
+    fn update_settings(&mut self, settings: &Settings) -> Result<SettingsUpdate> {
+        self.settings = settings.clone();
+        Ok(SettingsUpdate {
+            settings: self.settings.clone(),
+            status_message: if self.persisted {
+                "Settings saved.".to_string()
+            } else {
+                "Settings updated for this run only.".to_string()
+            },
+        })
+    }
+
+    fn share_url(&mut self, session: &Session) -> Result<String> {
+        share_url_for_session(&self.settings, session).map_err(|err| anyhow!(err.message()))
+    }
+
+    fn launch_options(
+        &mut self,
+        session: &Session,
+        mode: LaunchMode,
+        current_cwd: &std::path::Path,
+    ) -> Result<Vec<LaunchOption>> {
+        launch_options_with_defaults(&self.settings, session, mode, current_cwd)
+            .map_err(|err| anyhow!(err.message()))
+    }
+
+    fn prepare_launch(
+        &mut self,
+        session: &Session,
+        mode: LaunchMode,
+        current_cwd: &std::path::Path,
+        options: &[LaunchOption],
+    ) -> Result<ResumeTarget> {
+        if mode == LaunchMode::Resume && options.is_empty() {
+            return default_resume_for_session(session).map_err(|err| anyhow!(err.message()));
+        }
+        prepare_launch(session, mode, current_cwd, options).map_err(|err| anyhow!(err.message()))
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -471,12 +576,11 @@ mod tests {
         let mut settings = Settings::default();
         settings.share.base_url = "http://host:8787".to_string();
         settings.share.token = "secret".to_string();
-        let mut app = App::new_with_settings(
+        let mut app = App::new_with_test_settings(
             vec![session(ProviderKind::Codex, "sid", "hello codex")],
             ProviderFilter::All,
             Vec::new(),
             settings,
-            None,
         );
 
         app.handle_key(KeyEvent::from(KeyCode::Char('u')));
@@ -510,13 +614,8 @@ mod tests {
         let mut settings = Settings::default();
         settings.share.base_url = "http://host:8787".to_string();
         settings.share.token = "secret".to_string();
-        let mut app = App::new_with_settings(
-            vec![remote],
-            ProviderFilter::All,
-            Vec::new(),
-            settings,
-            None,
-        );
+        let mut app =
+            App::new_with_test_settings(vec![remote], ProviderFilter::All, Vec::new(), settings);
 
         app.handle_key(KeyEvent::from(KeyCode::Char('u')));
 
@@ -664,13 +763,8 @@ mod tests {
         let mut settings = Settings::default();
         settings.set_remote_enabled("work-mac", false);
 
-        let app = App::new_with_settings(
-            vec![remote],
-            ProviderFilter::All,
-            Vec::new(),
-            settings,
-            None,
-        );
+        let app =
+            App::new_with_test_settings(vec![remote], ProviderFilter::All, Vec::new(), settings);
 
         assert!(app.filtered_indices.is_empty());
     }
@@ -683,12 +777,11 @@ mod tests {
         let mut settings = Settings::default();
         settings.set_remote_enabled("work-mac", false);
 
-        let app = App::new_with_settings(
+        let app = App::new_with_test_settings(
             vec![local, remote],
             ProviderFilter::All,
             Vec::new(),
             settings,
-            None,
         );
 
         assert_eq!(app.filtered_indices.len(), 1);
@@ -840,12 +933,11 @@ mod tests {
     fn launch_dialog_uses_configured_f_defaults() {
         let mut settings = Settings::default();
         settings.set_launch_default(LaunchMode::Fork, LaunchOptionKind::UseCurrentDir, true);
-        let mut app = App::new_with_settings(
+        let mut app = App::new_with_test_settings(
             vec![session(ProviderKind::Claude, "sid", "hello claude")],
             ProviderFilter::All,
             Vec::new(),
             settings,
-            None,
         );
         app.current_cwd = PathBuf::from("/current");
 

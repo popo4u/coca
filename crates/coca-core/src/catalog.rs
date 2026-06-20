@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::model::{ProviderFilter, Session};
 use crate::providers::{load_sessions, sort_sessions};
@@ -14,7 +15,7 @@ pub struct SessionCatalogOptions {
     pub remote_config: RemoteConfig,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SessionCatalog {
     pub sessions: Vec<Session>,
     pub warnings: Vec<String>,

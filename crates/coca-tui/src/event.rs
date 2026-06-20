@@ -1,9 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use coca_core::frontend::{
-    default_resume_for_session, launch_options_with_defaults, prepare_launch,
-    save_settings_change_owned, share_url_for_session,
-};
 use coca_core::launch::LaunchMode;
 
 use super::app::{
@@ -151,11 +147,16 @@ impl App {
                 None
             }
             KeyCode::Enter => {
-                let session = self.selected_session()?;
-                match default_resume_for_session(session) {
+                let session = self.selected_session()?.clone();
+                match self.core_client.prepare_launch(
+                    &session,
+                    LaunchMode::Resume,
+                    &self.current_cwd,
+                    &[],
+                ) {
                     Ok(target) => Some(Action::Resume(target)),
                     Err(err) => {
-                        self.status_message = Some(err.message());
+                        self.status_message = Some(err.to_string());
                         None
                     }
                 }
@@ -193,11 +194,16 @@ impl App {
             }
             KeyCode::Enter => {
                 let dialog = self.launch_dialog.take()?;
-                let session = self.session_by_key(&dialog.session)?;
-                match prepare_launch(session, dialog.mode, &self.current_cwd, &dialog.options) {
+                let session = self.session_by_key(&dialog.session)?.clone();
+                match self.core_client.prepare_launch(
+                    &session,
+                    dialog.mode,
+                    &self.current_cwd,
+                    &dialog.options,
+                ) {
                     Ok(target) => Some(Action::Resume(target)),
                     Err(err) => {
-                        self.status_message = Some(err.message());
+                        self.status_message = Some(err.to_string());
                         None
                     }
                 }
@@ -278,19 +284,21 @@ impl App {
     }
 
     fn open_launch_dialog(&mut self, mode: LaunchMode) {
-        let Some(session) = self.selected_session() else {
+        let Some(session) = self.selected_session().cloned() else {
             return;
         };
-        let options =
-            match launch_options_with_defaults(&self.settings, session, mode, &self.current_cwd) {
-                Ok(options) => options,
-                Err(err) => {
-                    self.status_message = Some(err.message());
-                    return;
-                }
-            };
+        let options = match self
+            .core_client
+            .launch_options(&session, mode, &self.current_cwd)
+        {
+            Ok(options) => options,
+            Err(err) => {
+                self.status_message = Some(err.to_string());
+                return;
+            }
+        };
         self.launch_dialog = Some(LaunchDialog {
-            session: session_key(session),
+            session: session_key(&session),
             mode,
             selected_option: 0,
             options,
@@ -298,19 +306,19 @@ impl App {
     }
 
     fn open_share_dialog(&mut self) {
-        let Some(session) = self.selected_session() else {
+        let Some(session) = self.selected_session().cloned() else {
             return;
         };
-        let url = match share_url_for_session(&self.settings, session) {
+        let url = match self.core_client.share_url(&session) {
             Ok(url) => url,
             Err(err) => {
-                self.status_message = Some(err.message());
+                self.status_message = Some(err.to_string());
                 return;
             }
         };
 
         self.share_dialog = Some(ShareDialog {
-            session: session_key(session),
+            session: session_key(&session),
             url,
         });
     }
@@ -408,12 +416,10 @@ impl App {
     }
 
     fn save_settings_from_tui(&mut self, success_message: Option<String>) {
-        match save_settings_change_owned(
-            self.settings_path.clone(),
-            &self.settings,
-            success_message,
-        ) {
-            Ok(message) => {
+        match self.core_client.update_settings(&self.settings) {
+            Ok(update) => {
+                self.settings = update.settings;
+                let message = success_message.unwrap_or(update.status_message);
                 if self.status_message.is_none()
                     || !self
                         .status_message
@@ -425,7 +431,7 @@ impl App {
                 }
             }
             Err(err) => {
-                self.status_message = Some(err.message());
+                self.status_message = Some(format!("Failed to save settings: {err:#}"));
             }
         }
     }

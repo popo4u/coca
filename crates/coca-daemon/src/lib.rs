@@ -2,8 +2,8 @@ pub use coca_core::server::{serve, CoreOptions};
 
 use std::path::PathBuf;
 
-use anyhow::Result;
-use coca_core::catalog::{load_session_catalog, SessionCatalogOptions};
+use anyhow::{Context, Result};
+use coca_core::catalog::{load_session_catalog, SessionCatalog, SessionCatalogOptions};
 use coca_core::frontend::{
     launch_options_with_defaults, prepare_launch, share_url_for_session, FrontendError,
 };
@@ -12,9 +12,10 @@ use coca_core::model::{ProviderFilter, ProviderKind, Session, SessionOrigin};
 use coca_core::settings::{save_settings, Settings};
 use coca_protocol::{
     methods, CorePingResult, JsonRpcRequest, JsonRpcResponse, LaunchModeWire, LaunchOptionKindWire,
-    LaunchOptionWire, LaunchOptionsParams, LaunchPrepareParams, PreparedLaunch, SessionGetParams,
-    SessionRef, SettingsUpdateParams, ShareUrlParams,
+    LaunchOptionWire, LaunchOptionsParams, LaunchPrepareParams, PreparedLaunch, RpcId,
+    SessionGetParams, SessionRef, SettingsUpdateParams, ShareUrlParams,
 };
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 
 #[cfg(unix)]
@@ -58,7 +59,7 @@ impl RpcDaemon {
     fn dispatch(&mut self, request: JsonRpcRequest) -> Result<Value, RpcDispatchError> {
         match request.method.as_str() {
             methods::CORE_PING => serde_json::to_value(CorePingResult::default()),
-            methods::SESSIONS_LIST => serde_json::to_value(self.sessions()?),
+            methods::SESSIONS_LIST => serde_json::to_value(self.session_catalog()?),
             methods::SESSIONS_GET => {
                 let params: SessionGetParams = parse_params(request.params)?;
                 let session = self
@@ -136,7 +137,7 @@ impl RpcDaemon {
         .map_err(|err| RpcDispatchError::internal(err.to_string()))
     }
 
-    fn sessions(&self) -> Result<Vec<Session>, RpcDispatchError> {
+    fn session_catalog(&self) -> Result<SessionCatalog, RpcDispatchError> {
         let catalog = load_session_catalog(SessionCatalogOptions {
             codex_home: self.options.codex_home.clone(),
             claude_home: self.options.claude_home.clone(),
@@ -144,6 +145,11 @@ impl RpcDaemon {
             remote_config: self.options.settings.remote_config(),
         })
         .map_err(|err| RpcDispatchError::internal(format!("{err:#}")))?;
+        Ok(catalog)
+    }
+
+    fn sessions(&self) -> Result<Vec<Session>, RpcDispatchError> {
+        let catalog = self.session_catalog()?;
         Ok(catalog.sessions)
     }
 
@@ -157,6 +163,103 @@ impl RpcDaemon {
                 && origin_matches(&session.origin, &reference.origin)
         }))
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct LocalRpcClient {
+    daemon: RpcDaemon,
+    next_id: i64,
+}
+
+impl LocalRpcClient {
+    pub fn new(options: RpcDaemonOptions) -> Self {
+        Self::from_daemon(RpcDaemon::new(options))
+    }
+
+    pub fn from_daemon(daemon: RpcDaemon) -> Self {
+        Self { daemon, next_id: 1 }
+    }
+
+    pub fn session_catalog(&mut self) -> Result<SessionCatalog> {
+        self.call(methods::SESSIONS_LIST, None)
+    }
+
+    pub fn settings(&mut self) -> Result<Settings> {
+        self.call(methods::SETTINGS_GET, None)
+    }
+
+    pub fn settings_update(&mut self, settings: Settings) -> Result<Settings> {
+        let settings = serde_json::to_value(settings).context("failed to encode settings")?;
+        self.call(
+            methods::SETTINGS_UPDATE,
+            to_params(SettingsUpdateParams { settings })?,
+        )
+    }
+
+    pub fn share_url(&mut self, session: SessionRef) -> Result<String> {
+        let result: Value =
+            self.call(methods::SHARE_URL, to_params(ShareUrlParams { session })?)?;
+        result
+            .get("url")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .context("share.url response did not include url")
+    }
+
+    pub fn launch_options(&mut self, params: LaunchOptionsParams) -> Result<Vec<LaunchOptionWire>> {
+        self.call(methods::LAUNCH_OPTIONS, to_params(params)?)
+    }
+
+    pub fn launch_prepare(&mut self, params: LaunchPrepareParams) -> Result<PreparedLaunch> {
+        self.call(methods::LAUNCH_PREPARE, to_params(params)?)
+    }
+
+    fn call<T>(&mut self, method: &str, params: Option<Value>) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let id = self.next_request_id();
+        let request = JsonRpcRequest::new(id.clone(), method, params);
+        let response = self.daemon.handle_request(request);
+        decode_response(response, id)
+    }
+
+    fn next_request_id(&mut self) -> RpcId {
+        let id = self.next_id;
+        self.next_id += 1;
+        RpcId::Number(id)
+    }
+}
+
+fn to_params<T>(params: T) -> Result<Option<Value>>
+where
+    T: Serialize,
+{
+    serde_json::to_value(params)
+        .map(Some)
+        .context("failed to encode RPC params")
+}
+
+fn decode_response<T>(response: JsonRpcResponse, expected_id: RpcId) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    if response.id != expected_id {
+        anyhow::bail!(
+            "RPC response id mismatch: expected {:?}, got {:?}",
+            expected_id,
+            response.id
+        );
+    }
+
+    if let Some(error) = response.error {
+        anyhow::bail!("RPC error {}: {}", error.code, error.message);
+    }
+
+    let result = response
+        .result
+        .context("RPC response did not include result")?;
+    serde_json::from_value(result).context("failed to decode RPC response")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -265,7 +368,9 @@ fn launch_option(option: LaunchOptionWire) -> LaunchOption {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coca_core::settings::ConfiguredRemote;
     use coca_protocol::{methods, PROTOCOL_VERSION};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn ping_returns_protocol_version() {
@@ -279,13 +384,77 @@ mod tests {
     }
 
     #[test]
-    fn sessions_list_returns_json_array() {
-        let mut daemon = RpcDaemon::new(test_options());
+    fn sessions_list_returns_catalog_including_warnings() {
+        let mut options = test_options();
+        options.settings.remotes.push(ConfiguredRemote {
+            name: "bad".to_string(),
+            base_url: "https://127.0.0.1:8787".to_string(),
+            token: "secret".to_string(),
+            enabled: true,
+        });
+        let mut daemon = RpcDaemon::new(options);
 
         let response = daemon.handle_request(JsonRpcRequest::new(1, methods::SESSIONS_LIST, None));
 
         assert!(response.error.is_none());
-        assert!(response.result.unwrap().is_array());
+        let catalog: SessionCatalog = serde_json::from_value(response.result.unwrap()).unwrap();
+        assert!(catalog.sessions.is_empty());
+        assert_eq!(catalog.warnings.len(), 1);
+        assert!(catalog.warnings[0].contains("bad:"));
+    }
+
+    #[test]
+    fn typed_client_returns_empty_session_catalog_from_empty_provider_roots() {
+        let mut client = LocalRpcClient::new(test_options());
+
+        let catalog = client.session_catalog().unwrap();
+
+        assert_eq!(catalog, SessionCatalog::default());
+    }
+
+    #[test]
+    fn typed_client_updates_settings_through_json_rpc() {
+        let mut client = LocalRpcClient::new(test_options());
+        let mut settings = Settings::default();
+        settings.ensure_defaults();
+        settings.share.base_url = "http://host:8787".to_string();
+        settings.share.token = "secret".to_string();
+        settings.launch_defaults.resume.yolo = true;
+
+        let updated = client.settings_update(settings.clone()).unwrap();
+
+        assert_eq!(updated, settings);
+    }
+
+    #[test]
+    fn typed_client_session_methods_return_rpc_errors_with_empty_provider_roots() {
+        let mut client = LocalRpcClient::new(test_options());
+        let session = missing_session_ref();
+        let current_cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+        let share_error = client.share_url(session.clone()).unwrap_err().to_string();
+        assert!(share_error.contains("RPC error 404: session not found"));
+
+        let options_error = client
+            .launch_options(LaunchOptionsParams {
+                session: session.clone(),
+                mode: LaunchModeWire::Resume,
+                current_cwd: current_cwd.clone(),
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(options_error.contains("RPC error 404: session not found"));
+
+        let prepare_error = client
+            .launch_prepare(LaunchPrepareParams {
+                session,
+                mode: LaunchModeWire::Resume,
+                current_cwd,
+                options: Vec::new(),
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(prepare_error.contains("RPC error 404: session not found"));
     }
 
     #[test]
@@ -304,12 +473,32 @@ mod tests {
     fn test_options() -> RpcDaemonOptions {
         let mut settings = Settings::default();
         settings.ensure_defaults();
+        let (codex_home, claude_home) = empty_provider_roots();
         RpcDaemonOptions {
             settings,
             settings_path: None,
-            codex_home: None,
-            claude_home: None,
+            codex_home: Some(codex_home),
+            claude_home: Some(claude_home),
             provider_filter: ProviderFilter::All,
         }
+    }
+
+    fn missing_session_ref() -> SessionRef {
+        SessionRef {
+            origin: "local".to_string(),
+            provider: "codex".to_string(),
+            id: "missing".to_string(),
+        }
+    }
+
+    fn empty_provider_roots() -> (PathBuf, PathBuf) {
+        static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+
+        let root = std::env::temp_dir().join(format!(
+            "coca-daemon-empty-roots-{}-{}",
+            std::process::id(),
+            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+        ));
+        (root.join("codex"), root.join("claude"))
     }
 }

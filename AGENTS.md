@@ -20,6 +20,7 @@ Use `.ai/` for durable planning notes, long-term task memory, and handoff contex
 
 - State important assumptions before coding when the request has multiple plausible interpretations.
 - Ask when ambiguity would risk the wrong behavior; otherwise make the smallest reasonable assumption and keep moving.
+- For broad refactors or multi-file work, use subagents where practical to keep the main session context focused. Give each subagent a narrow, non-overlapping ownership area and do not duplicate their work in the main thread.
 - Prefer the minimum code that solves the requested problem. Do not add speculative features, one-off abstractions, or configurability that was not requested.
 - Keep edits surgical. Touch only files and lines that directly support the task.
 - Match the existing style and module boundaries, even when a different structure would also work.

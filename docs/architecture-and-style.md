@@ -15,6 +15,7 @@ Prefer small modules over large files. Keep responsibilities separated so new co
 - Keep launch command construction in core, separate from rendering and key handling.
 - Keep process execution isolated behind a small module. Unix-only APIs must be guarded with `#[cfg(unix)]`; Windows must keep a working fallback.
 - Keep protocol and IPC crates free of UI code and provider parsing.
+- TUI/GUI frontends should consume core through the RPC/client boundary. In-process clients may use the same JSON-RPC router as a transport optimization, but frontend code should not call provider, settings, share, or launch internals directly.
 - Use `Path`/`PathBuf` for paths. Do not hard-code platform-specific separators.
 - Keep cross-platform behavior in mind for Linux, macOS, and Windows.
 
@@ -24,8 +25,8 @@ Prefer small modules over large files. Keep responsibilities separated so new co
 - `crates/coca-protocol/`: JSON-RPC wire types and method names for core/frontend communication.
 - `crates/coca-ipc/`: local IPC framing and transport helpers.
 - `crates/coca-daemon/`: core process host and RPC/server adapters.
-- `crates/coca-tui/`: app state, key handling, rendering, and view helpers for the terminal frontend.
-- `src/`: root CLI shell and final process execution bridge.
+- `crates/coca-tui/`: app state, key handling, rendering, and view helpers for the terminal frontend. It owns the `CoreClient` frontend contract.
+- `src/`: root CLI shell, frontend RPC client adapter, and final process execution bridge.
 - `xtask/`: project automation.
 
 ## Coding Style
@@ -58,6 +59,6 @@ When adding a provider:
 - Keep key handling, app state, and rendering separated.
 - Rendering helpers should be pure where practical.
 - Do not let modal-specific keys leak into the main list behavior.
-- Use core frontend/service APIs for business behavior instead of direct provider, share, settings, or launch internals.
+- Use the `CoreClient`/RPC boundary for business behavior instead of direct provider, share, settings, or launch internals.
 - Preserve existing keybindings unless the user requests changes.
 - Keep state transitions covered by tests where practical.

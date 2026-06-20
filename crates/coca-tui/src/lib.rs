@@ -1,4 +1,5 @@
 mod app;
+mod core_client;
 mod event;
 mod render;
 mod views;
@@ -34,3 +35,4 @@ pub mod formatting {
 }
 
 pub use app::run_tui;
+pub use core_client::{CoreClient, SettingsUpdate};
