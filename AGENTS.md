@@ -16,6 +16,12 @@ Use `.ai/` for durable planning notes, long-term task memory, and handoff contex
 
 `AGENTS.md` remains the constitution-level repository guidance: architecture constraints, working principles, and verification expectations. Do not treat `.ai/` notes as overriding `AGENTS.md`, `docs/architecture-and-style.md`, or explicit user instructions.
 
+## Deployment Runbook
+
+For LLM-driven build, update, or deploy work, use `.ai/deploy-runbook.md` as the process runbook. Inspect the current environment first, build artifacts that match the target OS/architecture, restart the discovered `coca core` service, and verify sessions API/share pages.
+
+Remote deployment requires explicit user intent. If the user does not name a remote, inspect enabled remotes in `~/.config/coca/settings.json`, summarize them with secrets redacted, and ask before deploying any remote. Do not infer remote targets from prior sessions. Redact tokens in all output and prefer subagents for remote deploy work when available.
+
 ## Working Principles
 
 - State important assumptions before coding when the request has multiple plausible interpretations.
