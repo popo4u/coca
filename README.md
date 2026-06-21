@@ -10,7 +10,7 @@ It lets you browse, inspect, resume, and fork conversations created by tools lik
 - Filters by provider and searches across session text.
 - Shows session metadata and the full first prompt inline.
 - Opens a transcript viewer for reconstructed conversation history.
-- Shows a read-only Web share URL for local sessions.
+- Shows a read-only React Web share URL for local sessions.
 - Resumes existing sessions with the right provider command.
 - Forks or executes sessions with provider-specific launch options.
 - Fetches remote sessions through a read-only HTTP core.
@@ -91,7 +91,28 @@ Run a read-only core on a machine that has Codex or Claude history:
 coca core
 ```
 
-The core listens on `core.bind` and serves both the remote session API and browser share pages. The default bind is `0.0.0.0:8787`; the default share URL is `http://127.0.0.1:8787`. To share across a LAN, open settings with `,` and set `share.base_url` to the machine's reachable address, then restart `coca core`.
+The core listens on `core.bind` and serves the read-only remote session API. The default bind is `0.0.0.0:8787`. Browser pages are served by `coca web`, not by `coca core`.
+
+## Web Frontend
+
+Build the React frontend, then run the Web API/static host:
+
+```sh
+cd app/web
+npm install
+npm run build
+cd ../..
+coca web
+coca web --bind 127.0.0.1:8787
+```
+
+The Web frontend uses `share.token` for API access:
+
+```text
+http://127.0.0.1:8787/?token=<secret>
+```
+
+Rust serves JSON APIs under `/api/v1/*` and static files from `app/web/dist`. React owns the browser UI for sessions, detail views, config overview, and share links. `/api/v1/stream` reserves the future terminal event transport shape.
 
 Run the local JSON-RPC daemon for frontend/core IPC:
 
@@ -100,17 +121,17 @@ coca daemon
 coca daemon --socket ~/.config/coca/core.sock
 ```
 
-The daemon uses the same core capabilities as the TUI and is the local IPC boundary intended for future GUI integration.
+The daemon uses the same app-layer capabilities as the TUI and is the local IPC boundary intended for future GUI integration.
 
 The default TUI path uses the same JSON-RPC core router through an in-process client, so terminal UI behavior and daemon behavior stay on the same frontend/core boundary.
 
 Press `u` on a local session in the TUI to show its browser URL:
 
 ```text
-http://192.168.1.20:8787/s/codex/<session-id>?token=<secret>
+http://192.168.1.20:8787/?token=<secret>#/session/local/codex/<session-id>
 ```
 
-Shared sessions are browse-only and expose metadata plus the reconstructed transcript. The Web page does not include source paths or resume/fork commands. Anyone with the URL, token, and network access can read the session, so use a strong token and bind only to networks you trust.
+Shared sessions are browse-only and expose metadata plus the reconstructed transcript through the React Web app. The Web API does not include source paths or resume/fork commands in session DTOs. Anyone with the URL, token, and network access can read the session, so use a strong token and bind only to networks you trust.
 
 Configure the browsing machine with `~/.config/coca/settings.json`:
 
@@ -156,11 +177,16 @@ Development setup, local run commands, verification, and release build commands 
 
 The codebase is a Rust workspace that keeps the main responsibilities separated:
 
-- `coca-core`: shared models, provider parsing, session catalog, settings, share, remote loading, and launch planning
+- `coca-core`: shared models, provider parsing, session catalog primitives, settings persistence primitives, remote loading, and launch construction primitives
+- `coca-app`: user-visible use cases and frontend/API DTOs
 - `coca-protocol`: JSON-RPC wire contract for frontends and core
 - `coca-ipc`: local IPC framing and transport helpers
 - `coca-daemon`: core host and server/RPC adapters
 - `coca-tui`: terminal UI state, events, rendering, view helpers, and the frontend `CoreClient` contract
+- `coca-web`: JSON API and static host for the browser frontend
+- `app/web`: React + TypeScript Web frontend
+- `app/gui`: reserved for a future desktop GUI frontend
+- `app/tui`: reserved for a possible future terminal frontend location; current TUI code remains in `crates/coca-tui`
 - root `coca`: CLI shell, frontend RPC client adapter, and platform-aware process execution bridge
 - `xtask`: project automation for verification and builds
 

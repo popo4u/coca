@@ -514,7 +514,7 @@ impl App {
         match item {
             ConfigItem::CoreBind => "Example: 0.0.0.0:8787",
             ConfigItem::ShareBaseUrl => "Example: http://192.168.1.20:8787",
-            ConfigItem::ShareToken => "Used by coca core for API and share links.",
+            ConfigItem::ShareToken => "Used by coca web for API and share links.",
             ConfigItem::OriginLocal
             | ConfigItem::OriginRemote(_)
             | ConfigItem::LaunchDefault { .. } => "",

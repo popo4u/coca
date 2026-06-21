@@ -10,7 +10,6 @@ use crate::http::{
 };
 use crate::model::{ProviderFilter, Session};
 use crate::providers;
-use crate::share;
 
 #[derive(Clone, Debug)]
 pub struct CoreOptions {
@@ -60,14 +59,6 @@ fn route_request(request: &HttpRequest, options: &CoreOptions) -> HttpResponse {
     if path == "/api/sessions" {
         return route_sessions_api(request, options);
     }
-    if path.starts_with("/s/") {
-        return share::route_request_with_loader(
-            &request.method,
-            &request.target,
-            options.token.trim(),
-            || load_local_sessions(options),
-        );
-    }
     simple_response(404, "Not Found", "Not found")
 }
 
@@ -107,7 +98,6 @@ fn bearer_token(request: &HttpRequest) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ChatMessage, ProviderKind, SessionOrigin};
 
     #[test]
     fn sessions_api_requires_bearer_token() {
@@ -149,18 +139,6 @@ mod tests {
         assert_eq!(response.status, 405);
     }
 
-    #[test]
-    fn share_route_uses_query_token() {
-        let options = test_options();
-        let sessions = vec![session(ProviderKind::Codex, "sid", "title")];
-        let response =
-            share::route_request("GET", "/s/codex/sid?token=secret", "secret", &sessions);
-
-        assert_eq!(response.status, 200);
-        assert!(response.body.contains("title"));
-        assert_eq!(options.token, "secret");
-    }
-
     fn test_options() -> CoreOptions {
         CoreOptions {
             bind: "127.0.0.1:0".to_string(),
@@ -179,28 +157,6 @@ mod tests {
                 .iter()
                 .map(|(name, value)| (name.to_string(), value.to_string()))
                 .collect(),
-        }
-    }
-
-    fn session(provider: ProviderKind, id: &str, title: &str) -> Session {
-        Session {
-            origin: SessionOrigin::Local,
-            provider,
-            id: id.to_string(),
-            title: title.to_string(),
-            cwd: "/tmp/work".to_string(),
-            created_at_ms: Some(1),
-            updated_at_ms: Some(2),
-            model: Some("model".to_string()),
-            source_path: "/tmp/session".into(),
-            first_user_message: Some(title.to_string()),
-            transcript: vec![ChatMessage {
-                role: "user".to_string(),
-                text: "hello <world>".to_string(),
-                timestamp_ms: Some(1),
-            }],
-            resume_program: provider.to_string(),
-            resume_args: vec!["resume".to_string(), id.to_string()],
         }
     }
 }

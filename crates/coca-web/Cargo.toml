@@ -1,0 +1,14 @@
+[package]
+name = "coca-web"
+version = "0.1.0"
+edition = "2021"
+description = "Web frontend for coca."
+
+[dependencies]
+anyhow = "1.0"
+coca-app = { path = "../coca-app" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+coca-core = { path = "../coca-core" }

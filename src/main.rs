@@ -3,9 +3,11 @@ mod core_client;
 mod process;
 
 use anyhow::{Context, Result};
+use coca_app::AppOptions;
 use coca_core::settings::load_settings_for_cli;
 use coca_daemon::{serve as serve_core, serve_rpc, CoreOptions, RpcDaemonOptions};
 use coca_tui::run_tui;
+use coca_web::{serve as serve_web, WebCache, WebOptions};
 
 use crate::cli::{Cli, Command};
 use crate::core_client::RpcCoreClient;
@@ -38,6 +40,19 @@ fn main() -> Result<()> {
                     },
                 )
             }
+            Command::Web(args) => serve_web(WebOptions {
+                bind: args.bind().unwrap_or_else(|| settings.core.bind.clone()),
+                app: AppOptions {
+                    settings,
+                    settings_path: Some(settings_path),
+                    codex_home: args.codex_home(),
+                    claude_home: args.claude_home(),
+                    provider_filter: args.provider_filter(),
+                    database_path: None,
+                },
+                static_dir: args.static_dir().unwrap_or_else(default_web_static_dir),
+                cache: WebCache::default(),
+            }),
         };
     }
 
@@ -55,4 +70,11 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn default_web_static_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("app")
+        .join("web")
+        .join("dist")
 }

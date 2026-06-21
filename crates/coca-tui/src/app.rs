@@ -22,11 +22,9 @@ use crate::core_client::SettingsUpdate;
 #[cfg(test)]
 use anyhow::anyhow;
 #[cfg(test)]
-use coca_core::catalog::SessionCatalog;
+use coca_app::{AppOptions, AppService};
 #[cfg(test)]
-use coca_core::frontend::{
-    default_resume_for_session, launch_options_with_defaults, prepare_launch, share_url_for_session,
-};
+use coca_core::catalog::SessionCatalog;
 
 pub fn run_tui(
     mut core_client: Box<dyn CoreClient>,
@@ -398,6 +396,17 @@ impl TestCoreClient {
             persisted,
         }
     }
+
+    fn app_service(&self) -> AppService {
+        AppService::new(AppOptions {
+            settings: self.settings.clone(),
+            settings_path: None,
+            codex_home: None,
+            claude_home: None,
+            provider_filter: ProviderFilter::All,
+            database_path: None,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -426,7 +435,10 @@ impl CoreClient for TestCoreClient {
     }
 
     fn share_url(&mut self, session: &Session) -> Result<String> {
-        share_url_for_session(&self.settings, session).map_err(|err| anyhow!(err.message()))
+        self.app_service()
+            .share_link_for_session(session)
+            .map(|link| link.url)
+            .map_err(|err| anyhow!("{err:#}"))
     }
 
     fn launch_options(
@@ -435,8 +447,9 @@ impl CoreClient for TestCoreClient {
         mode: LaunchMode,
         current_cwd: &std::path::Path,
     ) -> Result<Vec<LaunchOption>> {
-        launch_options_with_defaults(&self.settings, session, mode, current_cwd)
-            .map_err(|err| anyhow!(err.message()))
+        self.app_service()
+            .launch_options_with_defaults(session, mode, current_cwd)
+            .map_err(|err| anyhow!("{err:#}"))
     }
 
     fn prepare_launch(
@@ -446,10 +459,15 @@ impl CoreClient for TestCoreClient {
         current_cwd: &std::path::Path,
         options: &[LaunchOption],
     ) -> Result<ResumeTarget> {
+        let service = self.app_service();
         if mode == LaunchMode::Resume && options.is_empty() {
-            return default_resume_for_session(session).map_err(|err| anyhow!(err.message()));
+            return service
+                .default_resume_for_session(session)
+                .map_err(|err| anyhow!("{err:#}"));
         }
-        prepare_launch(session, mode, current_cwd, options).map_err(|err| anyhow!(err.message()))
+        service
+            .prepare_launch(session, mode, current_cwd, options)
+            .map_err(|err| anyhow!("{err:#}"))
     }
 }
 
@@ -587,7 +605,7 @@ mod tests {
 
         assert_eq!(
             app.share_dialog.as_ref().map(|dialog| dialog.url.as_str()),
-            Some("http://host:8787/s/codex/sid?token=secret")
+            Some("http://host:8787/?token=secret#/session/local/codex/sid")
         );
     }
 
@@ -602,9 +620,8 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('u')));
 
         let url = app.share_dialog.as_ref().map(|dialog| dialog.url.as_str());
-        assert!(url
-            .unwrap()
-            .starts_with("http://127.0.0.1:8787/s/codex/sid?token="));
+        assert!(url.unwrap().starts_with("http://127.0.0.1:8787/?token="));
+        assert!(url.unwrap().ends_with("#/session/local/codex/sid"));
     }
 
     #[test]
@@ -840,7 +857,7 @@ mod tests {
         assert_eq!(app.settings.share.base_url, "http://192.168.1.20:8787");
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Settings saved. Restart coca core for changes to take effect.")
+            Some("Settings saved. Restart coca web for changes to take effect.")
         );
     }
 
@@ -873,7 +890,7 @@ mod tests {
         assert_eq!(app.settings.core.bind, "127.0.0.1:9999");
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Settings saved. Restart coca core for changes to take effect.")
+            Some("Settings saved. Restart coca web for changes to take effect.")
         );
     }
 

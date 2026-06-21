@@ -11,21 +11,28 @@ Prefer small modules over large files. Keep responsibilities separated so new co
 ## Architecture Rules
 
 - Keep provider parsing read-only. Never mutate `~/.codex`, `~/.claude`, or provider history files.
-- Keep provider logic separate from frontend logic. Providers load normalized session data; TUI/GUI frontends render and edit UI state only.
-- Keep launch command construction in core, separate from rendering and key handling.
+- Keep provider logic separate from frontend and app workflow logic. Providers load normalized session data only.
+- Keep user-visible workflows in `coca-app`, not in `coca-core`. Session sharing, config summaries, frontend DTOs, launch orchestration, and future terminal lifecycle are app-layer behavior.
+- Keep launch command construction primitives in core, but defaults, permissions, and frontend-facing orchestration belong in app.
 - Keep process execution isolated behind a small module. Unix-only APIs must be guarded with `#[cfg(unix)]`; Windows must keep a working fallback.
 - Keep protocol and IPC crates free of UI code and provider parsing.
-- TUI/GUI frontends should consume core through the RPC/client boundary. In-process clients may use the same JSON-RPC router as a transport optimization, but frontend code should not call provider, settings, share, or launch internals directly.
+- TUI/Web/GUI frontends should consume `coca-app` through a client/API boundary. In-process clients may use the same app service as a transport optimization, but frontend code should not call provider, settings, share, or launch internals directly.
+- Rust Web code must not render user-facing HTML. It serves JSON APIs, reserved stream endpoints, and static assets built from `app/web`.
 - Use `Path`/`PathBuf` for paths. Do not hard-code platform-specific separators.
 - Keep cross-platform behavior in mind for Linux, macOS, and Windows.
 
 ## Crate Ownership
 
-- `crates/coca-core/`: normalized models, provider loaders, session catalog, settings, share, remote loading, launch planning, and frontend-facing core use cases.
+- `crates/coca-core/`: normalized models, provider loaders, session catalog primitives, settings persistence primitives, remote loading, and launch construction primitives.
+- `crates/coca-app/`: user-visible use cases and frontend/API DTOs: session browse/detail, config summaries, share links, launch orchestration, and future terminal lifecycle.
 - `crates/coca-protocol/`: JSON-RPC wire types and method names for core/frontend communication.
 - `crates/coca-ipc/`: local IPC framing and transport helpers.
-- `crates/coca-daemon/`: core process host and RPC/server adapters.
+- `crates/coca-daemon/`: app/core process host and RPC/server adapters.
 - `crates/coca-tui/`: app state, key handling, rendering, and view helpers for the terminal frontend. It owns the `CoreClient` frontend contract.
+- `crates/coca-web/`: HTTP API/static asset host for the React Web frontend.
+- `app/web/`: React + TypeScript browser frontend. It talks only to `crates/coca-web` APIs.
+- `app/gui/`: reserved for a future desktop GUI frontend.
+- `app/tui/`: reserved for a possible future home for the terminal frontend; today TUI code remains in `crates/coca-tui/`.
 - `src/`: root CLI shell, frontend RPC client adapter, and final process execution bridge.
 - `xtask/`: project automation.
 
@@ -59,6 +66,6 @@ When adding a provider:
 - Keep key handling, app state, and rendering separated.
 - Rendering helpers should be pure where practical.
 - Do not let modal-specific keys leak into the main list behavior.
-- Use the `CoreClient`/RPC boundary for business behavior instead of direct provider, share, settings, or launch internals.
+- Use the `CoreClient`/RPC/app boundary for business behavior instead of direct provider, settings, share, or launch internals.
 - Preserve existing keybindings unless the user requests changes.
 - Keep state transitions covered by tests where practical.

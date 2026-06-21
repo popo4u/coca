@@ -402,7 +402,7 @@ impl App {
 
         self.settings.ensure_defaults();
         let success_message = restart_core
-            .then(|| "Settings saved. Restart coca core for changes to take effect.".to_string());
+            .then(|| "Settings saved. Restart coca web for changes to take effect.".to_string());
         self.save_settings_from_tui(success_message);
     }
 

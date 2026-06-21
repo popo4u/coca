@@ -6,6 +6,7 @@ This guide covers local setup, running the app from source, verification, and bu
 
 - Rust stable toolchain
 - Cargo
+- Node.js and npm for the React Web frontend
 - A terminal that supports TUI applications
 - Optional: Codex and/or Claude session history on the machine
 
@@ -58,6 +59,29 @@ Override the core bind for this run:
 cargo run -- core --bind 127.0.0.1:8787
 ```
 
+Build and run the React Web frontend:
+
+```sh
+cd app/web
+npm install
+npm run build
+cd ../..
+cargo run -- web --bind 127.0.0.1:8787
+```
+
+Open the Web frontend and enter `share.token`, or pass it once as a query token:
+
+```text
+http://127.0.0.1:8787/?token=<secret>
+```
+
+During frontend development, run Vite and proxy API calls to `coca web`:
+
+```sh
+cd app/web
+npm run dev
+```
+
 Run the local JSON-RPC daemon for frontend/core IPC:
 
 ```sh
@@ -67,7 +91,7 @@ cargo run -- daemon --socket ~/.config/coca/core.sock
 
 The default TUI path also uses the JSON-RPC core router through an in-process client, so UI code follows the same boundary that the local daemon exposes over a socket.
 
-In the TUI, press `,` to edit `core.bind`, `share.base_url`, and `share.token`, then press `u` on a local session to show its share URL. Restart `coca core` after changing core or share settings used by the running server.
+In the TUI, press `,` to edit `core.bind`, `share.base_url`, and `share.token`, then press `u` on a local session to show its share URL. Restart `coca core` after changing core bind settings, and restart `coca web` after changing share settings used by the running Web host.
 
 Show CLI help:
 
@@ -90,6 +114,14 @@ It runs:
 cargo fmt --all --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+```
+
+The Rust verification command does not currently run frontend checks. Run these
+after changing `app/web`:
+
+```sh
+cd app/web
+npm run build
 ```
 
 Focused commands are also available:
@@ -182,11 +214,16 @@ The current release flow intentionally publishes bare binaries only. It does not
 
 The workspace is organized by responsibility:
 
-- `crates/coca-core/`: normalized models, provider loaders, session catalog, settings, share, remote loading, and launch planning.
+- `crates/coca-core/`: normalized models, provider loaders, session catalog primitives, settings persistence primitives, remote loading, and launch construction primitives.
+- `crates/coca-app/`: app-layer use cases and frontend/API DTOs.
 - `crates/coca-protocol/`: JSON-RPC wire types for frontend/core communication.
 - `crates/coca-ipc/`: local IPC framing and transport helpers.
 - `crates/coca-daemon/`: core host, RPC router, and server adapters.
 - `crates/coca-tui/`: app state, key handling, rendering, view helpers, and the frontend `CoreClient` contract.
+- `crates/coca-web/`: JSON API and static asset host for Web.
+- `app/web/`: React + TypeScript Web frontend.
+- `app/gui/`: reserved for a future desktop GUI frontend.
+- `app/tui/`: reserved for a possible future terminal frontend location; current TUI code remains in `crates/coca-tui/`.
 - `src/`: root CLI shell, frontend RPC client adapter, and final process execution bridge.
 - `xtask/`: project automation.
 

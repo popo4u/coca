@@ -73,6 +73,7 @@ impl From<ProviderArg> for ProviderFilter {
 pub enum Command {
     Core(CoreArgs),
     Daemon(DaemonArgs),
+    Web(WebArgs),
 }
 
 #[derive(Debug, Args)]
@@ -130,6 +131,50 @@ pub struct DaemonArgs {
 impl DaemonArgs {
     pub fn socket(&self) -> Option<PathBuf> {
         self.socket.clone().or_else(default_daemon_socket_path)
+    }
+
+    pub fn codex_home(&self) -> Option<PathBuf> {
+        self.codex_home
+            .clone()
+            .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+    }
+
+    pub fn claude_home(&self) -> Option<PathBuf> {
+        self.claude_home
+            .clone()
+            .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
+    }
+
+    pub fn provider_filter(&self) -> ProviderFilter {
+        self.provider.into()
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct WebArgs {
+    #[arg(long, value_name = "HOST:PORT")]
+    bind: Option<String>,
+
+    #[arg(long, value_name = "DIR")]
+    static_dir: Option<PathBuf>,
+
+    #[arg(long, value_name = "DIR")]
+    codex_home: Option<PathBuf>,
+
+    #[arg(long, value_name = "DIR")]
+    claude_home: Option<PathBuf>,
+
+    #[arg(long, value_enum, default_value_t = ProviderArg::All)]
+    provider: ProviderArg,
+}
+
+impl WebArgs {
+    pub fn bind(&self) -> Option<String> {
+        self.bind.clone()
+    }
+
+    pub fn static_dir(&self) -> Option<PathBuf> {
+        self.static_dir.clone()
     }
 
     pub fn codex_home(&self) -> Option<PathBuf> {

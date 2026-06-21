@@ -1,14 +1,18 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io::{BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 
 use crate::model::{Session, SessionOrigin};
+
+const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const REMOTE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct RemoteConfig {
@@ -82,11 +86,23 @@ pub fn load_remote_config(path: &Path) -> Result<RemoteConfig> {
 pub fn load_remote_sessions(config: &RemoteConfig) -> (Vec<Session>, Vec<String>) {
     let mut sessions = Vec::new();
     let mut warnings = Vec::new();
+    let handles = config
+        .remotes
+        .iter()
+        .cloned()
+        .map(|remote| {
+            thread::spawn(move || {
+                let name = remote.name.clone();
+                fetch_remote_sessions(&remote).map_err(|err| format!("{name}: {err:#}"))
+            })
+        })
+        .collect::<Vec<_>>();
 
-    for remote in &config.remotes {
-        match fetch_remote_sessions(remote) {
-            Ok(mut remote_sessions) => sessions.append(&mut remote_sessions),
-            Err(err) => warnings.push(format!("{}: {err:#}", remote.name)),
+    for handle in handles {
+        match handle.join() {
+            Ok(Ok(mut remote_sessions)) => sessions.append(&mut remote_sessions),
+            Ok(Err(warning)) => warnings.push(warning),
+            Err(_) => warnings.push("remote loader thread panicked".to_string()),
         }
     }
 
@@ -96,13 +112,19 @@ pub fn load_remote_sessions(config: &RemoteConfig) -> (Vec<Session>, Vec<String>
 pub fn fetch_remote_sessions(remote: &RemoteEndpoint) -> Result<Vec<Session>> {
     let base = parse_http_base_url(remote.base_url.trim())
         .with_context(|| format!("invalid remote base_url for {}", remote.name))?;
-    let mut stream = TcpStream::connect(&base.addr)
+    let addr = base
+        .addr
+        .to_socket_addrs()
+        .with_context(|| format!("failed to resolve remote {}", remote.name))?
+        .next()
+        .ok_or_else(|| anyhow!("remote {} resolved to no addresses", remote.name))?;
+    let mut stream = TcpStream::connect_timeout(&addr, REMOTE_CONNECT_TIMEOUT)
         .with_context(|| format!("failed to connect to remote {}", remote.name))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
+        .set_read_timeout(Some(REMOTE_IO_TIMEOUT))
         .context("failed to set remote read timeout")?;
     stream
-        .set_write_timeout(Some(Duration::from_secs(10)))
+        .set_write_timeout(Some(REMOTE_IO_TIMEOUT))
         .context("failed to set remote write timeout")?;
 
     let target = base.target("/api/sessions");

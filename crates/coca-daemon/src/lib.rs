@@ -3,10 +3,8 @@ pub use coca_core::server::{serve, CoreOptions};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use coca_core::catalog::{load_session_catalog, SessionCatalog, SessionCatalogOptions};
-use coca_core::frontend::{
-    launch_options_with_defaults, prepare_launch, share_url_for_session, FrontendError,
-};
+use coca_app::{AppOptions, AppService};
+use coca_core::catalog::SessionCatalog;
 use coca_core::launch::{LaunchMode, LaunchOption, LaunchOptionKind};
 use coca_core::model::{ProviderFilter, ProviderKind, Session, SessionOrigin};
 use coca_core::settings::{save_settings, Settings};
@@ -59,7 +57,11 @@ impl RpcDaemon {
     fn dispatch(&mut self, request: JsonRpcRequest) -> Result<Value, RpcDispatchError> {
         match request.method.as_str() {
             methods::CORE_PING => serde_json::to_value(CorePingResult::default()),
-            methods::SESSIONS_LIST => serde_json::to_value(self.session_catalog()?),
+            methods::SESSIONS_LIST => serde_json::to_value(
+                self.app()
+                    .session_catalog()
+                    .map_err(RpcDispatchError::from_anyhow)?,
+            ),
             methods::SESSIONS_GET => {
                 let params: SessionGetParams = parse_params(request.params)?;
                 let session = self
@@ -85,11 +87,13 @@ impl RpcDaemon {
             }
             methods::SHARE_URL => {
                 let params: ShareUrlParams = parse_params(request.params)?;
-                let session = self
-                    .find_session(&params.session)?
+                self.find_session(&params.session)?
                     .ok_or_else(|| RpcDispatchError::not_found("session not found"))?;
-                let url = share_url_for_session(&self.options.settings, &session)
-                    .map_err(RpcDispatchError::from_frontend)?;
+                let url = self
+                    .app()
+                    .share_session(&app_session_ref(&params.session))
+                    .map_err(RpcDispatchError::from_anyhow)?
+                    .url;
                 Ok(json!({ "url": url }))
             }
             methods::LAUNCH_OPTIONS => {
@@ -98,13 +102,11 @@ impl RpcDaemon {
                     .find_session(&params.session)?
                     .ok_or_else(|| RpcDispatchError::not_found("session not found"))?;
                 let mode = launch_mode(params.mode);
-                let options = launch_options_with_defaults(
-                    &self.options.settings,
-                    &session,
-                    mode,
-                    PathBuf::from(params.current_cwd).as_path(),
-                )
-                .map_err(RpcDispatchError::from_frontend)?;
+                let current_cwd = PathBuf::from(params.current_cwd);
+                let options = self
+                    .app()
+                    .launch_options_with_defaults(&session, mode, &current_cwd)
+                    .map_err(RpcDispatchError::from_anyhow)?;
                 serde_json::to_value(
                     options
                         .into_iter()
@@ -123,9 +125,10 @@ impl RpcDaemon {
                     .into_iter()
                     .map(launch_option)
                     .collect::<Vec<_>>();
-                let target =
-                    prepare_launch(&session, launch_mode(params.mode), &current_cwd, &options)
-                        .map_err(RpcDispatchError::from_frontend)?;
+                let target = self
+                    .app()
+                    .prepare_launch(&session, launch_mode(params.mode), &current_cwd, &options)
+                    .map_err(RpcDispatchError::from_anyhow)?;
                 serde_json::to_value(PreparedLaunch {
                     program: target.program,
                     args: target.args,
@@ -137,19 +140,22 @@ impl RpcDaemon {
         .map_err(|err| RpcDispatchError::internal(err.to_string()))
     }
 
-    fn session_catalog(&self) -> Result<SessionCatalog, RpcDispatchError> {
-        let catalog = load_session_catalog(SessionCatalogOptions {
+    fn app(&self) -> AppService {
+        AppService::new(AppOptions {
+            settings: self.options.settings.clone(),
+            settings_path: self.options.settings_path.clone(),
             codex_home: self.options.codex_home.clone(),
             claude_home: self.options.claude_home.clone(),
             provider_filter: self.options.provider_filter,
-            remote_config: self.options.settings.remote_config(),
+            database_path: None,
         })
-        .map_err(|err| RpcDispatchError::internal(format!("{err:#}")))?;
-        Ok(catalog)
     }
 
     fn sessions(&self) -> Result<Vec<Session>, RpcDispatchError> {
-        let catalog = self.session_catalog()?;
+        let catalog = self
+            .app()
+            .session_catalog()
+            .map_err(RpcDispatchError::from_anyhow)?;
         Ok(catalog.sessions)
     }
 
@@ -297,10 +303,10 @@ impl RpcDispatchError {
         }
     }
 
-    fn from_frontend(error: FrontendError) -> Self {
+    fn from_anyhow(error: anyhow::Error) -> Self {
         Self {
             code: 400,
-            message: error.message(),
+            message: format!("{error:#}"),
         }
     }
 }
@@ -325,6 +331,14 @@ fn origin_matches(origin: &SessionOrigin, reference: &str) -> bool {
     match origin {
         SessionOrigin::Local => reference == "local",
         SessionOrigin::Remote(name) => reference == name,
+    }
+}
+
+fn app_session_ref(reference: &SessionRef) -> coca_app::SessionRef {
+    coca_app::SessionRef {
+        origin: reference.origin.clone(),
+        provider: reference.provider.clone(),
+        id: reference.id.clone(),
     }
 }
 

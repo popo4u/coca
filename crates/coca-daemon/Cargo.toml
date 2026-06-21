@@ -6,6 +6,7 @@ description = "Core daemon host for coca."
 
 [dependencies]
 anyhow = "1.0"
+coca-app = { path = "../coca-app" }
 coca-core = { path = "../coca-core" }
 coca-ipc = { path = "../coca-ipc" }
 coca-protocol = { path = "../coca-protocol" }

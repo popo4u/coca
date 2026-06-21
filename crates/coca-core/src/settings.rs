@@ -15,6 +15,8 @@ pub struct Settings {
     #[serde(default)]
     pub core: CoreSettings,
     #[serde(default)]
+    pub ai: AiSettings,
+    #[serde(default)]
     pub remotes: Vec<ConfiguredRemote>,
     #[serde(default)]
     pub origin_visibility: OriginVisibility,
@@ -45,6 +47,7 @@ impl Settings {
         if self.core.bind.trim().is_empty() {
             anyhow::bail!("core bind must not be empty");
         }
+        self.ai.validate()?;
         if self.share.base_url.trim().is_empty() {
             anyhow::bail!("share base_url must not be empty");
         }
@@ -58,6 +61,9 @@ impl Settings {
         let mut changed = false;
         if self.core.bind.trim().is_empty() {
             self.core.bind = default_core_bind();
+            changed = true;
+        }
+        if self.ai.ensure_defaults() {
             changed = true;
         }
         if self.share.base_url.trim().is_empty() {
@@ -143,6 +149,117 @@ impl Default for CoreSettings {
     fn default() -> Self {
         Self {
             bind: default_core_bind(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AiSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_ai_provider")]
+    pub provider: String,
+    #[serde(default = "default_ai_base_url")]
+    pub base_url: String,
+    #[serde(default = "default_ai_model")]
+    pub model: String,
+    #[serde(default = "default_ai_api_key_env")]
+    pub api_key_env: String,
+    #[serde(default)]
+    pub api_key: String,
+}
+
+impl AiSettings {
+    fn validate(&self) -> Result<()> {
+        if self.provider.trim() != "openai_compatible" {
+            anyhow::bail!("ai provider must be openai_compatible");
+        }
+        let base_url = self.base_url.trim();
+        if self.enabled && base_url.is_empty() {
+            anyhow::bail!("ai base_url must not be empty");
+        }
+        if !(base_url.is_empty()
+            || base_url.starts_with("http://")
+            || base_url.starts_with("https://"))
+        {
+            anyhow::bail!("ai base_url must start with http:// or https://");
+        }
+        if base_url.chars().any(char::is_whitespace) {
+            anyhow::bail!("ai base_url must not contain whitespace");
+        }
+
+        let model = self.model.trim();
+        if self.enabled && model.is_empty() {
+            anyhow::bail!("ai model must not be empty");
+        }
+        if model.chars().any(char::is_whitespace) {
+            anyhow::bail!("ai model must not contain whitespace");
+        }
+        if self.api_key.chars().any(|ch| matches!(ch, '\r' | '\n')) {
+            anyhow::bail!("ai api_key must not contain newlines");
+        }
+        if self.api_key_env.chars().any(char::is_whitespace) {
+            anyhow::bail!("ai api_key_env must not contain whitespace");
+        }
+        if self.enabled && !self.key_configured() {
+            anyhow::bail!("ai api_key or configured ai api_key_env is required when ai is enabled");
+        }
+        Ok(())
+    }
+
+    fn ensure_defaults(&mut self) -> bool {
+        let mut changed = false;
+        if self.provider.trim().is_empty() {
+            self.provider = default_ai_provider();
+            changed = true;
+        }
+        if self.base_url.trim().is_empty() {
+            self.base_url = default_ai_base_url();
+            changed = true;
+        }
+        if self.model.trim().is_empty() {
+            self.model = default_ai_model();
+            changed = true;
+        }
+        if self.api_key_env.trim().is_empty() {
+            self.api_key_env = default_ai_api_key_env();
+            changed = true;
+        }
+        changed
+    }
+
+    pub fn key_configured(&self) -> bool {
+        !self.api_key.trim().is_empty()
+            || (!self.api_key_env.trim().is_empty()
+                && std::env::var(self.api_key_env.trim())
+                    .map(|value| !value.trim().is_empty())
+                    .unwrap_or(false))
+    }
+
+    pub fn key_source(&self) -> &'static str {
+        if !self.api_key.trim().is_empty() {
+            "stored"
+        } else if !self.api_key_env.trim().is_empty()
+            && std::env::var(self.api_key_env.trim())
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+        {
+            "env"
+        } else {
+            "missing"
+        }
+    }
+}
+
+impl Default for AiSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_ai_provider(),
+            base_url: default_ai_base_url(),
+            model: default_ai_model(),
+            api_key_env: default_ai_api_key_env(),
+            api_key: String::new(),
         }
     }
 }
@@ -368,6 +485,22 @@ fn default_core_bind() -> String {
     "0.0.0.0:8787".to_string()
 }
 
+fn default_ai_provider() -> String {
+    "openai_compatible".to_string()
+}
+
+fn default_ai_base_url() -> String {
+    "https://api.openai.com/v1".to_string()
+}
+
+fn default_ai_model() -> String {
+    "gpt-4o-mini".to_string()
+}
+
+fn default_ai_api_key_env() -> String {
+    "OPENAI_API_KEY".to_string()
+}
+
 fn default_share_base_url() -> String {
     "http://127.0.0.1:8787".to_string()
 }
@@ -417,6 +550,9 @@ mod tests {
 
         assert!(settings.remotes[0].enabled);
         assert_eq!(settings.core.bind, "0.0.0.0:8787");
+        assert_eq!(settings.ai.base_url, "https://api.openai.com/v1");
+        assert_eq!(settings.ai.model, "gpt-4o-mini");
+        assert!(settings.ai.api_key.is_empty());
         assert!(settings.origin_visible(&SessionOrigin::Local));
         assert!(settings.launch_default(LaunchMode::Resume, LaunchOptionKind::Yolo));
         assert!(settings.launch_default(LaunchMode::Fork, LaunchOptionKind::UseCurrentDir));
@@ -432,6 +568,9 @@ mod tests {
         assert!(settings.ensure_defaults());
 
         assert_eq!(settings.core.bind, "0.0.0.0:8787");
+        assert_eq!(settings.ai.base_url, "https://api.openai.com/v1");
+        assert_eq!(settings.ai.model, "gpt-4o-mini");
+        assert!(settings.ai.api_key.is_empty());
         assert_eq!(settings.share.base_url, "http://127.0.0.1:8787");
         assert_eq!(settings.share.token.len(), 64);
         assert!(settings
@@ -439,6 +578,32 @@ mod tests {
             .token
             .chars()
             .all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn validates_ai_settings_and_only_requires_key_when_enabled() {
+        let mut settings = Settings::default();
+        settings.ensure_defaults();
+
+        assert!(settings.validate().is_ok());
+
+        settings.ai.base_url = "ftp://example.test/v1".to_string();
+        assert!(settings.validate().is_err());
+
+        settings.ai.base_url = "https://api.openai.com/v1".to_string();
+        settings.ai.model = " ".to_string();
+        settings.ai.enabled = true;
+        assert!(settings.validate().is_err());
+
+        settings.ai.model = "gpt-4o-mini".to_string();
+        settings.ai.api_key = "line\nbreak".to_string();
+        assert!(settings.validate().is_err());
+
+        settings.ai.api_key.clear();
+        assert!(settings.validate().is_err());
+
+        settings.ai.api_key = "sk-test".to_string();
+        assert!(settings.validate().is_ok());
     }
 
     #[test]

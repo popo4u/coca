@@ -268,12 +268,25 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "coca-app",
  "coca-core",
  "coca-daemon",
  "coca-protocol",
  "coca-tui",
+ "coca-web",
  "dirs",
  "tempfile",
+]
+
+[[package]]
+name = "coca-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "coca-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -296,6 +309,7 @@ name = "coca-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "coca-app",
  "coca-core",
  "coca-ipc",
  "coca-protocol",
@@ -328,10 +342,22 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "coca-app",
  "coca-core",
  "crossterm",
  "dirs",
  "ratatui",
+]
+
+[[package]]
+name = "coca-web"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "coca-app",
+ "coca-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
