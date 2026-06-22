@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -43,6 +43,7 @@ pub fn serve(options: WebOptions) -> Result<()> {
 
     let listener = TcpListener::bind(options.bind.trim())
         .with_context(|| format!("failed to bind {}", options.bind))?;
+    print_startup_info(&options, listener.local_addr()?);
     for stream in listener.incoming() {
         let stream = stream.context("failed to accept web connection")?;
         let options = options.clone();
@@ -53,6 +54,62 @@ pub fn serve(options: WebOptions) -> Result<()> {
         });
     }
     Ok(())
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct WebStartupInfo {
+    listen_addr: String,
+    web_url: String,
+    share_base_url: String,
+    token: String,
+}
+
+fn print_startup_info(options: &WebOptions, listen_addr: SocketAddr) {
+    let info = startup_info(options, listen_addr);
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "coca web");
+    let _ = writeln!(stdout, "  address: {}", info.listen_addr);
+    let _ = writeln!(stdout, "  web: {}", info.web_url);
+    let _ = writeln!(stdout, "  share base_url: {}", info.share_base_url);
+    let _ = writeln!(stdout, "  token: {}", info.token);
+    let _ = stdout.flush();
+}
+
+fn startup_info(options: &WebOptions, listen_addr: SocketAddr) -> WebStartupInfo {
+    let token = options.app.settings.share.token.trim().to_string();
+    WebStartupInfo {
+        listen_addr: listen_addr.to_string(),
+        web_url: format!(
+            "{}/?token={}",
+            local_web_base_url(listen_addr),
+            percent_encode_query_value(&token)
+        ),
+        share_base_url: options.app.settings.share.base_url.trim().to_string(),
+        token,
+    }
+}
+
+fn local_web_base_url(addr: SocketAddr) -> String {
+    let host = match addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_string(),
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) if ip.is_unspecified() => "[::1]".to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    format!("http://{host}:{}", addr.port())
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 fn handle_stream(mut stream: TcpStream, options: WebOptions) -> Result<()> {
@@ -650,6 +707,38 @@ mod tests {
         assert!(String::from_utf8(response.body)
             .unwrap()
             .contains("React web assets"));
+    }
+
+    #[test]
+    fn startup_info_uses_loopback_url_for_unspecified_bind() {
+        let options = web_options();
+
+        let info = startup_info(&options, SocketAddr::from(([0, 0, 0, 0], 8787)));
+
+        assert_eq!(
+            info,
+            WebStartupInfo {
+                listen_addr: "0.0.0.0:8787".to_string(),
+                web_url: "http://127.0.0.1:8787/?token=secret".to_string(),
+                share_base_url: "http://127.0.0.1:8787".to_string(),
+                token: "secret".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn startup_info_formats_ipv6_and_encodes_token() {
+        let mut options = web_options();
+        options.app.settings.share.token = " secret/with space? ".to_string();
+
+        let info = startup_info(&options, "[::1]:8787".parse().unwrap());
+
+        assert_eq!(info.listen_addr, "[::1]:8787");
+        assert_eq!(
+            info.web_url,
+            "http://[::1]:8787/?token=secret%2Fwith%20space%3F"
+        );
+        assert_eq!(info.token, "secret/with space?");
     }
 
     fn json_request(method: &str, target: &str, body: &str) -> Request {

@@ -89,8 +89,8 @@ pub fn load_remote_sessions(config: &RemoteConfig) -> (Vec<Session>, Vec<String>
     let handles = config
         .remotes
         .iter()
-        .cloned()
         .map(|remote| {
+            let remote = remote.clone();
             thread::spawn(move || {
                 let name = remote.name.clone();
                 fetch_remote_sessions(&remote).map_err(|err| format!("{name}: {err:#}"))
