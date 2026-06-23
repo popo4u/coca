@@ -1,5 +1,5 @@
 mod app;
-mod core_client;
+mod daemon_client;
 mod event;
 mod render;
 mod views;
@@ -35,4 +35,4 @@ pub mod formatting {
 }
 
 pub use app::run_tui;
-pub use core_client::{CoreClient, SettingsUpdate};
+pub use daemon_client::{DaemonClient, SettingsUpdate};

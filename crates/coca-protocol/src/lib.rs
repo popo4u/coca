@@ -5,14 +5,33 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const JSONRPC_VERSION: &str = "2.0";
 
 pub mod methods {
-    pub const CORE_PING: &str = "core.ping";
+    pub const DAEMON_PING: &str = "daemon.ping";
     pub const SESSIONS_LIST: &str = "sessions.list";
+    pub const SESSIONS_SUMMARIES: &str = "sessions.summaries";
     pub const SESSIONS_GET: &str = "sessions.get";
+    pub const SESSIONS_DETAIL: &str = "sessions.detail";
     pub const SETTINGS_GET: &str = "settings.get";
+    pub const SETTINGS_SUMMARY: &str = "settings.summary";
     pub const SETTINGS_UPDATE: &str = "settings.update";
+    pub const SETTINGS_AI_UPDATE: &str = "settings.ai.update";
     pub const SHARE_URL: &str = "share.url";
     pub const LAUNCH_OPTIONS: &str = "launch.options";
     pub const LAUNCH_PREPARE: &str = "launch.prepare";
+    pub const TERMINAL_LIST: &str = "terminal.list";
+    pub const TERMINAL_GET: &str = "terminal.get";
+}
+
+pub mod terminal_events {
+    pub const OPEN: &str = "terminal.open";
+    pub const ATTACH: &str = "terminal.attach";
+    pub const INPUT: &str = "terminal.input";
+    pub const RESIZE: &str = "terminal.resize";
+    pub const DETACH: &str = "terminal.detach";
+    pub const CLOSE: &str = "terminal.close";
+    pub const OPENED: &str = "terminal.opened";
+    pub const OUTPUT: &str = "terminal.output";
+    pub const EXIT: &str = "terminal.exit";
+    pub const ERROR: &str = "terminal.error";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -98,16 +117,16 @@ pub struct RpcError {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CorePingResult {
+pub struct DaemonPingResult {
     pub protocol_version: u32,
     pub service: String,
 }
 
-impl Default for CorePingResult {
+impl Default for DaemonPingResult {
     fn default() -> Self {
         Self {
             protocol_version: PROTOCOL_VERSION,
-            service: "coca-core".to_string(),
+            service: "coca-daemon".to_string(),
         }
     }
 }
@@ -181,6 +200,176 @@ pub struct SettingsUpdateParams {
     pub settings: Value,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SettingsSummaryParams {
+    pub gateway_bind: String,
+    pub terminal_socket_available: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AiSettingsUpdateParams {
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub enabled: Option<bool>,
+    pub provider: Option<String>,
+    pub api_key_env: Option<String>,
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub clear_api_key: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalId(pub String);
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalSeq(pub u64);
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalSize {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum TerminalModeWire {
+    Resume,
+    Fork,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum TerminalStateWire {
+    Starting,
+    Running,
+    Detached,
+    Exited,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalSessionSummary {
+    pub terminal_id: TerminalId,
+    pub session: SessionRef,
+    pub mode: TerminalModeWire,
+    pub state: TerminalStateWire,
+    pub attached_clients: usize,
+    pub active_writer: Option<String>,
+    pub last_seq: TerminalSeq,
+    pub size: TerminalSize,
+    pub exit: Option<TerminalExitInfo>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalExitInfo {
+    pub code: Option<i32>,
+    pub signal: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalListResult {
+    pub terminals: Vec<TerminalSessionSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalGetParams {
+    pub terminal_id: TerminalId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "event", content = "payload")]
+pub enum TerminalClientFrame {
+    #[serde(rename = "terminal.open")]
+    Open(TerminalOpen),
+    #[serde(rename = "terminal.attach")]
+    Attach(TerminalAttach),
+    #[serde(rename = "terminal.input")]
+    Input(TerminalInput),
+    #[serde(rename = "terminal.resize")]
+    Resize(TerminalResize),
+    #[serde(rename = "terminal.detach")]
+    Detach(TerminalDetach),
+    #[serde(rename = "terminal.close")]
+    Close(TerminalClose),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "event", content = "payload")]
+pub enum TerminalServerFrame {
+    #[serde(rename = "terminal.opened")]
+    Opened(TerminalOpened),
+    #[serde(rename = "terminal.output")]
+    Output(TerminalOutput),
+    #[serde(rename = "terminal.exit")]
+    Exit(TerminalExit),
+    #[serde(rename = "terminal.error")]
+    Error(TerminalError),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalOpen {
+    pub session: SessionRef,
+    pub mode: TerminalModeWire,
+    pub size: TerminalSize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalAttach {
+    pub terminal_id: TerminalId,
+    pub since_seq: Option<TerminalSeq>,
+    pub size: TerminalSize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalInput {
+    pub terminal_id: TerminalId,
+    pub data_b64: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalResize {
+    pub terminal_id: TerminalId,
+    pub size: TerminalSize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalDetach {
+    pub terminal_id: TerminalId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalClose {
+    pub terminal_id: TerminalId,
+    pub kill: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalOpened {
+    pub terminal: TerminalSessionSummary,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalOutput {
+    pub terminal_id: TerminalId,
+    pub seq: TerminalSeq,
+    pub data_b64: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalExit {
+    pub terminal_id: TerminalId,
+    pub exit: TerminalExitInfo,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalError {
+    pub request_id: Option<String>,
+    pub terminal_id: Option<TerminalId>,
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +405,38 @@ mod tests {
         assert_eq!(decoded, response);
         assert!(decoded.result.is_none());
         assert_eq!(decoded.error.unwrap().code, -32601);
+    }
+
+    #[test]
+    fn settings_summary_params_roundtrip() {
+        let params = SettingsSummaryParams {
+            gateway_bind: "127.0.0.1:8787".to_string(),
+            terminal_socket_available: true,
+        };
+
+        let json = serde_json::to_string(&params).unwrap();
+        let decoded: SettingsSummaryParams = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, params);
+        assert!(json.contains("gateway_bind"));
+    }
+
+    #[test]
+    fn terminal_frames_roundtrip_with_event_tags() {
+        let frame = TerminalClientFrame::Open(TerminalOpen {
+            session: SessionRef {
+                origin: "local".to_string(),
+                provider: "codex".to_string(),
+                id: "sid".to_string(),
+            },
+            mode: TerminalModeWire::Resume,
+            size: TerminalSize { cols: 80, rows: 24 },
+        });
+
+        let json = serde_json::to_string(&frame).unwrap();
+        let decoded: TerminalClientFrame = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, frame);
+        assert!(json.contains("terminal.open"));
     }
 }

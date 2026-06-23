@@ -16,8 +16,8 @@ Prefer small modules over large files. Keep responsibilities separated so new co
 - Keep launch command construction primitives in core, but defaults, permissions, and frontend-facing orchestration belong in app.
 - Keep process execution isolated behind a small module. Unix-only APIs must be guarded with `#[cfg(unix)]`; Windows must keep a working fallback.
 - Keep protocol and IPC crates free of UI code and provider parsing.
-- TUI/Web/GUI frontends should consume `coca-app` through a client/API boundary. In-process clients may use the same app service as a transport optimization, but frontend code should not call provider, settings, share, or launch internals directly.
-- Rust Web code must not render user-facing HTML. It serves JSON APIs, reserved stream endpoints, and static assets built from `app/web`.
+- Runtime authority belongs to `coca daemon`. TUI/Web/GUI frontends should consume daemon APIs through a client/API boundary instead of calling provider, settings, share, launch, or terminal internals directly.
+- The browser-facing Web service is a gateway. It serves JSON APIs, reserved stream endpoints, WebSocket bridges, and static assets built from `app/web`; it must not own provider parsing, settings authority, launch authority, or terminal lifecycle.
 - Use `Path`/`PathBuf` for paths. Do not hard-code platform-specific separators.
 - Keep cross-platform behavior in mind for Linux, macOS, and Windows.
 
@@ -25,12 +25,12 @@ Prefer small modules over large files. Keep responsibilities separated so new co
 
 - `crates/coca-core/`: normalized models, provider loaders, session catalog primitives, settings persistence primitives, remote loading, and launch construction primitives.
 - `crates/coca-app/`: user-visible use cases and frontend/API DTOs: session browse/detail, config summaries, share links, launch orchestration, and future terminal lifecycle.
-- `crates/coca-protocol/`: JSON-RPC wire types and method names for core/frontend communication.
+- `crates/coca-protocol/`: JSON-RPC wire types and method names for daemon/frontend communication.
 - `crates/coca-ipc/`: local IPC framing and transport helpers.
-- `crates/coca-daemon/`: app/core process host and RPC/server adapters.
-- `crates/coca-tui/`: app state, key handling, rendering, and view helpers for the terminal frontend. It owns the `CoreClient` frontend contract.
-- `crates/coca-web/`: HTTP API/static asset host for the React Web frontend.
-- `app/web/`: React + TypeScript browser frontend. It talks only to `crates/coca-web` APIs.
+- `crates/coca-daemon/`: local authoritative service host, RPC/server adapters, and daemon-owned runtime state such as terminal lifecycle.
+- `crates/coca-tui/`: app state, key handling, rendering, and view helpers for the terminal frontend. It owns the frontend daemon-client contract.
+- `crates/coca-web/`: browser gateway host for HTTP APIs, WebSocket bridges, and static assets for the React Web frontend.
+- `app/web/`: React + TypeScript browser frontend. It talks only to gateway APIs.
 - `app/gui/`: reserved for a future desktop GUI frontend.
 - `app/tui/`: reserved for a possible future home for the terminal frontend; today TUI code remains in `crates/coca-tui/`.
 - `src/`: root CLI shell, frontend RPC client adapter, and final process execution bridge.
@@ -66,6 +66,6 @@ When adding a provider:
 - Keep key handling, app state, and rendering separated.
 - Rendering helpers should be pure where practical.
 - Do not let modal-specific keys leak into the main list behavior.
-- Use the `CoreClient`/RPC/app boundary for business behavior instead of direct provider, settings, share, or launch internals.
+- Use the daemon client/RPC/app boundary for business behavior instead of direct provider, settings, share, launch, or terminal internals.
 - Preserve existing keybindings unless the user requests changes.
 - Keep state transitions covered by tests where practical.

@@ -25,8 +25,9 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ApiClient, clearToken, readToken, saveToken } from "../api/client";
+import { ApiClient, clearTerminalToken, clearToken, readTerminalToken, readToken, saveToken } from "../api/client";
 import type { ConfigSummary, HealthResponse, SessionDetail, SessionRef, SessionSummary, SessionsResponse } from "../api/types";
+import { TerminalPanel } from "./TerminalPanel";
 
 type View =
   | { name: "sessions" }
@@ -45,6 +46,7 @@ type MessageMode = "preview" | "raw";
 
 export function App() {
   const [token, setToken] = useState(readToken);
+  const [terminalToken, setTerminalToken] = useState(readTerminalToken);
   const [view, setView] = useState<View>(() => routeFromHash());
   const [theme, setTheme] = useState<Theme>(() => readTheme());
   const client = useMemo(() => new ApiClient(token), [token]);
@@ -75,12 +77,22 @@ export function App() {
       onNavigate={setView}
       onLogout={() => {
         clearToken();
+        clearTerminalToken();
         setToken("");
+        setTerminalToken("");
       }}
     >
       {view.name === "sessions" && <SessionsView client={client} onOpen={openDetail} />}
       {view.name === "config" && <ConfigView client={client} theme={theme} onThemeChange={setTheme} />}
-      {view.name === "detail" && <DetailView client={client} reference={view.ref} />}
+      {view.name === "detail" && (
+        <DetailView
+          client={client}
+          readToken={token}
+          terminalToken={terminalToken}
+          onTerminalTokenChange={setTerminalToken}
+          reference={view.ref}
+        />
+      )}
     </Shell>
   );
 
@@ -185,14 +197,26 @@ function SessionsView({ client, onOpen }: { client: ApiClient; onOpen: (session:
 function SessionRow({ session, onClick }: { session: SessionSummary; onClick: () => void }) {
   return (
     <button className="session-row" onClick={onClick}>
-      <span className="row-top"><strong>{session.provider}</strong><em>{session.origin}</em><time>{session.updated_label}</time></span>
+      <span className="row-top"><strong>{session.provider}</strong><em>{session.origin}</em><time>{session.updated_label}</time><TerminalCapabilityBadge session={session} /></span>
       <span className="row-title">{session.title}</span>
       <span className="row-meta"><code>{session.cwd}</code><span>{session.model ?? "-"}</span><span>{session.message_count} messages</span></span>
     </button>
   );
 }
 
-function DetailView({ client, reference }: { client: ApiClient; reference: SessionRef }) {
+function DetailView({
+  client,
+  readToken,
+  terminalToken,
+  onTerminalTokenChange,
+  reference
+}: {
+  client: ApiClient;
+  readToken: string;
+  terminalToken: string;
+  onTerminalTokenChange: (token: string) => void;
+  reference: SessionRef;
+}) {
   const [state, setState] = useState<LoadState<SessionDetail>>({ status: "loading" });
   const [share, setShare] = useState("");
 
@@ -215,7 +239,10 @@ function DetailView({ client, reference }: { client: ApiClient; reference: Sessi
           <p>session detail</p>
           <h1 title={summary.title}>{summary.title}</h1>
         </div>
-        <button className="icon-line" onClick={() => client.shareSession(reference).then((link) => setShare(link.url)).catch((error: Error) => setShare(error.message))}><Share2 size={16} />Share</button>
+        <div className="detail-actions">
+          <TerminalCapabilityBadge session={summary} />
+          <button className="icon-line" onClick={() => client.shareSession(reference).then((link) => setShare(link.url)).catch((error: Error) => setShare(error.message))}><Share2 size={16} />Share</button>
+        </div>
       </header>
       {share && <div className="notice"><code>{share}</code></div>}
       <section className="session-meta-panel" aria-label="Session metadata">
@@ -226,6 +253,14 @@ function DetailView({ client, reference }: { client: ApiClient; reference: Sessi
         <MetaTile icon={<FileText size={16} />} label="messages" value={`${summary.message_count}`} />
         <MetaTile icon={<Clock3 size={16} />} label="updated" value={summary.updated_label} />
       </section>
+      <TerminalPanel
+        client={client}
+        readToken={readToken}
+        terminalToken={terminalToken}
+        onTerminalTokenChange={onTerminalTokenChange}
+        session={summary}
+        reference={reference}
+      />
       <section className="transcript-panel" aria-label="Transcript">
         <header className="section-head">
           <p>transcript</p>
@@ -239,6 +274,12 @@ function DetailView({ client, reference }: { client: ApiClient; reference: Sessi
       </section>
     </div>
   );
+}
+
+function TerminalCapabilityBadge({ session }: { session: SessionSummary }) {
+  const label = session.terminal.enabled ? "terminal ready" : "browse only";
+  const title = session.terminal.unavailable_message ?? "Terminal resume and fork are available.";
+  return <span className={`terminal-badge ${session.terminal.enabled ? "ready" : "blocked"}`} title={title}>{label}</span>;
 }
 
 function MetaTile({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
@@ -396,8 +437,8 @@ function ConfigView({ client, theme, onThemeChange }: { client: ApiClient; theme
           </div>
         </section>
         <InfoPanel title="Service" rows={[
-          ["web bind", data.bind],
-          ["core bind", data.core_bind],
+          ["active bind", data.bind],
+          ["configured bind", data.gateway_bind],
           ["share base", data.share.base_url],
           ["share token", data.share.token_configured ? "set" : "missing"]
         ]} />
@@ -406,6 +447,13 @@ function ConfigView({ client, theme, onThemeChange }: { client: ApiClient; theme
           ["client events", health.data.stream.client_events.join(", ")],
           ["server events", health.data.stream.server_events.join(", ")]
         ] : [["status", "unavailable"]]} />
+        <InfoPanel title="Terminal access" rows={[
+          ["enabled", data.terminal.enabled ? "yes" : "no"],
+          ["token", data.terminal.token_configured ? "configured" : "missing"],
+          ["daemon", data.terminal.daemon_available ? "available" : "unavailable"],
+          ["socket", data.terminal.terminal_socket_available ? "available" : "unavailable"],
+          ["status", data.terminal.unavailable_message ?? "ready"]
+        ]} />
       </section>
       <AiConfigPanel
         summary={data.ai}
@@ -423,7 +471,9 @@ function ConfigView({ client, theme, onThemeChange }: { client: ApiClient; theme
             <div className="table-row" key={remote.name}>
               <strong>{remote.name}</strong>
               <span>{remote.base_url}</span>
-              <em>{remote.enabled ? "enabled" : "disabled"} / {remote.visible ? "visible" : "hidden"} / {remote.session_count} sessions</em>
+              <em>
+                {remote.enabled ? "enabled" : "disabled"} / {remote.visible ? "visible" : "hidden"} / {remote.terminal_ready ? "terminal ready" : (remote.terminal_unavailable_message ?? "browse-only")} / {remote.session_count} sessions
+              </em>
             </div>
           ))}
         </div>

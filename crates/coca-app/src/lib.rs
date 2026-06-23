@@ -117,7 +117,10 @@ impl AppService {
 
     pub fn web_sessions(&self) -> Result<SessionsResponse> {
         let catalog = self.session_catalog()?;
-        Ok(SessionsResponse::from_catalog(catalog))
+        Ok(SessionsResponse::from_catalog_with_settings(
+            catalog,
+            &self.options.settings,
+        ))
     }
 
     pub fn stored_web_sessions(&self) -> Result<Option<SessionsResponse>> {
@@ -132,16 +135,21 @@ impl AppService {
         if sessions.is_empty() {
             return Ok(None);
         }
-        Ok(Some(SessionsResponse::from_catalog(SessionCatalog {
-            sessions,
-            warnings: vec![
-                "serving sessions from coca storage while refreshing in background".to_string(),
-            ],
-        })))
+        Ok(Some(SessionsResponse::from_catalog_with_settings(
+            SessionCatalog {
+                sessions,
+                warnings: vec![
+                    "serving sessions from coca storage while refreshing in background".to_string(),
+                ],
+            },
+            &self.options.settings,
+        )))
     }
 
     pub fn web_session_detail(&self, reference: &SessionRef) -> Result<Option<SessionDetail>> {
-        Ok(self.session(reference)?.map(SessionDetail::from_session))
+        Ok(self.session(reference)?.map(|session| {
+            SessionDetail::from_session_with_settings(session, &self.options.settings)
+        }))
     }
 
     pub fn share_session(&self, reference: &SessionRef) -> Result<ShareLink> {
@@ -201,6 +209,27 @@ impl AppService {
         Ok(build_launch_target(session, mode, current_cwd, options))
     }
 
+    pub fn prepare_terminal_launch(
+        &self,
+        session: &Session,
+        mode: LaunchMode,
+    ) -> Result<ResumeTarget> {
+        let current_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::new());
+        self.prepare_terminal_launch_with_cwd(session, mode, &current_cwd)
+    }
+
+    pub fn prepare_terminal_launch_with_cwd(
+        &self,
+        session: &Session,
+        mode: LaunchMode,
+        current_cwd: &Path,
+    ) -> Result<ResumeTarget> {
+        ensure_terminal_enabled(&self.options.settings)?;
+        ensure_local(session)?;
+        let options = self.launch_options_with_defaults(session, mode, current_cwd)?;
+        Ok(build_launch_target(session, mode, current_cwd, &options))
+    }
+
     pub fn default_resume_for_session(&self, session: &Session) -> Result<ResumeTarget> {
         ensure_local(session)?;
         Ok(default_resume_target(session))
@@ -237,13 +266,17 @@ pub struct SessionsResponse {
 }
 
 impl SessionsResponse {
-    fn from_catalog(catalog: SessionCatalog) -> Self {
+    fn from_catalog_with_settings(catalog: SessionCatalog, settings: &Settings) -> Self {
+        Self::from_catalog_inner(catalog, Some(settings))
+    }
+
+    fn from_catalog_inner(catalog: SessionCatalog, settings: Option<&Settings>) -> Self {
         let counts = CatalogCounts::from_sessions(&catalog.sessions);
         Self {
             sessions: catalog
                 .sessions
                 .into_iter()
-                .map(SessionSummary::from_session)
+                .map(|session| SessionSummary::from_session(session, settings))
                 .collect(),
             warnings: catalog.warnings,
             counts,
@@ -290,10 +323,14 @@ pub struct SessionSummary {
     pub model: Option<String>,
     pub message_count: usize,
     pub first_user_message: Option<String>,
+    pub terminal: TerminalCapability,
 }
 
 impl SessionSummary {
-    fn from_session(session: Session) -> Self {
+    fn from_session(session: Session, settings: Option<&Settings>) -> Self {
+        let terminal = settings
+            .map(|settings| TerminalCapability::for_session(&session, settings))
+            .unwrap_or_else(|| TerminalCapability::browse_only("terminal status unavailable"));
         Self {
             origin: session.origin.to_string(),
             provider: session.provider.to_string(),
@@ -305,6 +342,7 @@ impl SessionSummary {
             model: session.model,
             message_count: session.transcript.len(),
             first_user_message: session.first_user_message,
+            terminal,
         }
     }
 }
@@ -316,7 +354,16 @@ pub struct SessionDetail {
 }
 
 impl SessionDetail {
+    #[cfg(test)]
     fn from_session(session: Session) -> Self {
+        Self::from_session_inner(session, None)
+    }
+
+    fn from_session_with_settings(session: Session, settings: &Settings) -> Self {
+        Self::from_session_inner(session, Some(settings))
+    }
+
+    fn from_session_inner(session: Session, settings: Option<&Settings>) -> Self {
         let transcript = session
             .transcript
             .iter()
@@ -327,7 +374,7 @@ impl SessionDetail {
             .map(ChatMessageDto::from_message)
             .collect();
         Self {
-            summary: SessionSummary::from_session(session),
+            summary: SessionSummary::from_session(session, settings),
             transcript,
         }
     }
@@ -359,9 +406,10 @@ pub struct ConfigSummary {
     pub service: String,
     pub version: String,
     pub bind: String,
-    pub core_bind: String,
+    pub gateway_bind: String,
     pub ai: AiSummary,
     pub share: ShareSummary,
+    pub terminal: TerminalConfigSummary,
     pub remotes: Vec<RemoteSummary>,
     pub launch_defaults: LaunchDefaultsSummary,
     pub counts: CatalogCounts,
@@ -372,29 +420,52 @@ impl ConfigSummary {
     fn from_parts(settings: &Settings, bind: &str, catalog: &SessionCatalog) -> Self {
         let counts = CatalogCounts::from_sessions(&catalog.sessions);
         Self {
-            service: "coca-web".to_string(),
+            service: "coca-gateway".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             bind: bind.to_string(),
-            core_bind: settings.core.bind.clone(),
+            gateway_bind: settings.gateway.bind.clone(),
             ai: AiSummary::from_settings(&settings.ai),
             share: ShareSummary {
                 base_url: settings.share.base_url.clone(),
                 token_configured: !settings.share.token.trim().is_empty(),
             },
+            terminal: TerminalConfigSummary::from_settings(settings),
             remotes: settings
                 .remotes
                 .iter()
-                .map(|remote| RemoteSummary {
-                    name: remote.name.clone(),
-                    base_url: remote.base_url.clone(),
-                    enabled: remote.enabled,
-                    visible: settings.origin_visible(&SessionOrigin::Remote(remote.name.clone())),
-                    token_configured: !remote.token.trim().is_empty(),
-                    session_count: counts
-                        .by_origin
-                        .get(&remote.name)
-                        .copied()
-                        .unwrap_or_default(),
+                .map(|remote| {
+                    let token_configured = !remote.token.trim().is_empty();
+                    let terminal_token_configured = remote
+                        .terminal_token
+                        .as_deref()
+                        .map(|token| !token.trim().is_empty())
+                        .unwrap_or(false);
+                    let terminal_unavailable = remote_terminal_unavailable(
+                        remote.enabled,
+                        token_configured,
+                        terminal_token_configured,
+                    );
+                    RemoteSummary {
+                        name: remote.name.clone(),
+                        base_url: remote.base_url.clone(),
+                        enabled: remote.enabled,
+                        visible: settings
+                            .origin_visible(&SessionOrigin::Remote(remote.name.clone())),
+                        token_configured,
+                        terminal_token_configured,
+                        terminal_ready: terminal_unavailable.is_none(),
+                        terminal_unavailable_code: terminal_unavailable
+                            .as_ref()
+                            .map(|(code, _)| (*code).to_string()),
+                        terminal_unavailable_message: terminal_unavailable
+                            .as_ref()
+                            .map(|(_, message)| (*message).to_string()),
+                        session_count: counts
+                            .by_origin
+                            .get(&remote.name)
+                            .copied()
+                            .unwrap_or_default(),
+                    }
                 })
                 .collect(),
             launch_defaults: LaunchDefaultsSummary {
@@ -410,6 +481,17 @@ impl ConfigSummary {
             counts,
             warnings: catalog.warnings.clone(),
         }
+    }
+
+    pub fn with_terminal_runtime(
+        mut self,
+        daemon_available: bool,
+        terminal_socket_available: bool,
+    ) -> Self {
+        self.terminal = self
+            .terminal
+            .with_runtime(daemon_available, terminal_socket_available);
+        self
     }
 }
 
@@ -457,12 +539,74 @@ pub struct ShareSummary {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalConfigSummary {
+    pub enabled: bool,
+    pub token_configured: bool,
+    pub daemon_available: bool,
+    pub terminal_socket_available: bool,
+    pub unavailable_code: Option<String>,
+    pub unavailable_message: Option<String>,
+}
+
+impl TerminalConfigSummary {
+    fn from_settings(settings: &Settings) -> Self {
+        Self {
+            enabled: settings.terminal.enabled,
+            token_configured: settings.terminal.token_configured(),
+            daemon_available: false,
+            terminal_socket_available: false,
+            unavailable_code: None,
+            unavailable_message: None,
+        }
+        .refresh_unavailable()
+    }
+
+    fn with_runtime(mut self, daemon_available: bool, terminal_socket_available: bool) -> Self {
+        self.daemon_available = daemon_available;
+        self.terminal_socket_available = terminal_socket_available;
+        self.refresh_unavailable()
+    }
+
+    fn refresh_unavailable(mut self) -> Self {
+        let unavailable = if !self.enabled {
+            Some((
+                "terminal_disabled",
+                "Terminal execution is disabled in settings.",
+            ))
+        } else if !self.token_configured {
+            Some((
+                "missing_terminal_token",
+                "Terminal token is not configured.",
+            ))
+        } else if !self.daemon_available {
+            Some(("daemon_unavailable", "coca daemon is not available."))
+        } else if !self.terminal_socket_available {
+            Some((
+                "terminal_socket_unavailable",
+                "coca daemon terminal socket is not available.",
+            ))
+        } else {
+            None
+        };
+        self.unavailable_code = unavailable.as_ref().map(|(code, _)| (*code).to_string());
+        self.unavailable_message = unavailable
+            .as_ref()
+            .map(|(_, message)| (*message).to_string());
+        self
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RemoteSummary {
     pub name: String,
     pub base_url: String,
     pub enabled: bool,
     pub visible: bool,
     pub token_configured: bool,
+    pub terminal_token_configured: bool,
+    pub terminal_ready: bool,
+    pub terminal_unavailable_code: Option<String>,
+    pub terminal_unavailable_message: Option<String>,
     pub session_count: usize,
 }
 
@@ -496,8 +640,10 @@ impl Default for StreamInfo {
             protocol: "coca.app-stream.v1",
             client_events: vec![
                 "terminal.open",
+                "terminal.attach",
                 "terminal.input",
                 "terminal.resize",
+                "terminal.detach",
                 "terminal.close",
             ],
             server_events: vec![
@@ -507,6 +653,87 @@ impl Default for StreamInfo {
                 "terminal.error",
             ],
         }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalCapability {
+    pub enabled: bool,
+    pub can_resume: bool,
+    pub can_fork: bool,
+    pub unavailable_code: Option<String>,
+    pub unavailable_message: Option<String>,
+}
+
+impl TerminalCapability {
+    fn for_session(session: &Session, settings: &Settings) -> Self {
+        if !settings.terminal.enabled {
+            return Self::unavailable(
+                "terminal_disabled",
+                "Terminal execution is disabled in settings.",
+            );
+        }
+        if !settings.terminal.token_configured() {
+            return Self::unavailable(
+                "missing_terminal_token",
+                "Terminal token is not configured.",
+            );
+        }
+        match &session.origin {
+            SessionOrigin::Local => Self::available(),
+            SessionOrigin::Remote(name) => {
+                let Some(remote) = settings.remotes.iter().find(|remote| &remote.name == name)
+                else {
+                    return Self::unavailable(
+                        "remote_browse_only",
+                        "Remote origin is not configured for terminal access.",
+                    );
+                };
+                if !remote.enabled {
+                    return Self::unavailable(
+                        "remote_browse_only",
+                        "Remote origin is disabled in settings.",
+                    );
+                }
+                if remote
+                    .terminal_token
+                    .as_deref()
+                    .map(|token| !token.trim().is_empty())
+                    .unwrap_or(false)
+                {
+                    Self::available()
+                } else {
+                    Self::unavailable(
+                        "remote_browse_only",
+                        "Remote terminal token is not configured; this remote is browse-only.",
+                    )
+                }
+            }
+        }
+    }
+
+    fn available() -> Self {
+        Self {
+            enabled: true,
+            can_resume: true,
+            can_fork: true,
+            unavailable_code: None,
+            unavailable_message: None,
+        }
+    }
+
+    fn unavailable(code: &str, message: &str) -> Self {
+        Self {
+            enabled: false,
+            can_resume: false,
+            can_fork: false,
+            unavailable_code: Some(code.to_string()),
+            unavailable_message: Some(message.to_string()),
+        }
+    }
+
+    fn browse_only(message: &str) -> Self {
+        Self::unavailable("browse_only", message)
     }
 }
 
@@ -541,6 +768,38 @@ fn ensure_local(session: &Session) -> Result<()> {
             "Remote sessions are browse-only in this version: {}",
             session.origin
         )
+    }
+}
+
+fn ensure_terminal_enabled(settings: &Settings) -> Result<()> {
+    if !settings.terminal.enabled {
+        anyhow::bail!("terminal execution is disabled in settings");
+    }
+    if !settings.terminal.token_configured() {
+        anyhow::bail!("terminal token is not configured");
+    }
+    Ok(())
+}
+
+fn remote_terminal_unavailable(
+    enabled: bool,
+    token_configured: bool,
+    terminal_token_configured: bool,
+) -> Option<(&'static str, &'static str)> {
+    if !enabled {
+        Some((
+            "remote_browse_only",
+            "Remote origin is disabled in settings.",
+        ))
+    } else if !token_configured {
+        Some(("remote_auth_failed", "Remote read token is not configured."))
+    } else if !terminal_token_configured {
+        Some((
+            "remote_browse_only",
+            "Remote terminal token is not configured; this remote is browse-only.",
+        ))
+    } else {
+        None
     }
 }
 
@@ -605,6 +864,7 @@ mod tests {
         let mut settings = Settings::default();
         settings.ensure_defaults();
         settings.ai.api_key = "sk-secret".to_string();
+        settings.terminal.token = "terminal-secret".to_string();
         let service = app_service(settings);
 
         let summary = service.config_summary("127.0.0.1:0").unwrap();
@@ -614,6 +874,92 @@ mod tests {
         assert_eq!(summary.ai.model, "gpt-4o-mini");
         assert!(summary.ai.api_key_configured);
         assert!(!body.contains("sk-secret"));
+        assert!(summary.terminal.token_configured);
+        assert_eq!(
+            summary.terminal.unavailable_code.as_deref(),
+            Some("terminal_disabled")
+        );
+        assert!(!body.contains("terminal-secret"));
+    }
+
+    #[test]
+    fn terminal_capability_reports_actionable_reasons() {
+        let mut settings = Settings::default();
+        settings.ensure_defaults();
+        settings.terminal.enabled = true;
+
+        let local = SessionSummary::from_session(session(), Some(&settings));
+        assert!(local.terminal.can_resume);
+        assert!(local.terminal.can_fork);
+
+        let mut remote_session = session();
+        remote_session.origin = SessionOrigin::Remote("work".to_string());
+        let remote = SessionSummary::from_session(remote_session.clone(), Some(&settings));
+        assert_eq!(
+            remote.terminal.unavailable_code.as_deref(),
+            Some("remote_browse_only")
+        );
+
+        settings
+            .remotes
+            .push(coca_core::settings::ConfiguredRemote {
+                name: "work".to_string(),
+                base_url: "http://127.0.0.1:8787".to_string(),
+                token: "read-secret".to_string(),
+                terminal_token: None,
+                enabled: true,
+            });
+        let remote = SessionSummary::from_session(remote_session.clone(), Some(&settings));
+        assert_eq!(
+            remote.terminal.unavailable_code.as_deref(),
+            Some("remote_browse_only")
+        );
+
+        settings.remotes[0].terminal_token = Some("terminal-secret".to_string());
+        let remote = SessionSummary::from_session(remote_session, Some(&settings));
+        assert!(remote.terminal.can_resume);
+        assert!(remote.terminal.can_fork);
+    }
+
+    #[test]
+    fn terminal_launch_requires_enabled_terminal_settings() {
+        let mut settings = Settings::default();
+        settings.ensure_defaults();
+        let service = app_service(settings);
+
+        let error = service
+            .prepare_terminal_launch_with_cwd(&session(), LaunchMode::Resume, Path::new("/work"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("terminal execution is disabled"));
+    }
+
+    #[test]
+    fn terminal_launch_uses_saved_launch_defaults() {
+        let mut settings = Settings::default();
+        settings.ensure_defaults();
+        settings.terminal.enabled = true;
+        settings.launch_defaults.fork.use_current_dir = true;
+        settings.launch_defaults.fork.yolo = true;
+        let service = app_service(settings);
+
+        let target = service
+            .prepare_terminal_launch_with_cwd(&session(), LaunchMode::Fork, Path::new("/work"))
+            .unwrap();
+
+        assert_eq!(target.program, "codex");
+        assert_eq!(
+            target.args,
+            vec![
+                "fork".to_string(),
+                "-C".to_string(),
+                "/work".to_string(),
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "sid".to_string(),
+            ]
+        );
+        assert_eq!(target.cwd.as_deref(), Some(Path::new("/work")));
     }
 
     #[test]

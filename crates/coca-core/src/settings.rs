@@ -13,7 +13,9 @@ use crate::remote::{load_remote_config, RemoteConfig, RemoteEndpoint};
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Settings {
     #[serde(default)]
-    pub core: CoreSettings,
+    pub daemon: DaemonSettings,
+    #[serde(default)]
+    pub gateway: GatewaySettings,
     #[serde(default)]
     pub ai: AiSettings,
     #[serde(default)]
@@ -24,6 +26,8 @@ pub struct Settings {
     pub launch_defaults: LaunchDefaults,
     #[serde(default)]
     pub share: ShareSettings,
+    #[serde(default)]
+    pub terminal: TerminalSettings,
 }
 
 impl Settings {
@@ -43,10 +47,17 @@ impl Settings {
             if remote.token.trim().is_empty() {
                 anyhow::bail!("remote {name} token must not be empty");
             }
+            if let Some(token) = &remote.terminal_token {
+                if token.trim().is_empty() {
+                    anyhow::bail!("remote {name} terminal_token must not be empty when configured");
+                }
+                if token.chars().any(|ch| matches!(ch, '\r' | '\n')) {
+                    anyhow::bail!("remote {name} terminal_token must not contain newlines");
+                }
+            }
         }
-        if self.core.bind.trim().is_empty() {
-            anyhow::bail!("core bind must not be empty");
-        }
+        self.daemon.validate()?;
+        self.gateway.validate()?;
         self.ai.validate()?;
         if self.share.base_url.trim().is_empty() {
             anyhow::bail!("share base_url must not be empty");
@@ -54,13 +65,17 @@ impl Settings {
         if self.share.token.trim().is_empty() {
             anyhow::bail!("share token must not be empty");
         }
+        self.terminal.validate()?;
         Ok(())
     }
 
     pub fn ensure_defaults(&mut self) -> bool {
         let mut changed = false;
-        if self.core.bind.trim().is_empty() {
-            self.core.bind = default_core_bind();
+        if self.daemon.ensure_defaults() {
+            changed = true;
+        }
+        if self.gateway.bind.trim().is_empty() {
+            self.gateway.bind = default_gateway_bind();
             changed = true;
         }
         if self.ai.ensure_defaults() {
@@ -72,6 +87,10 @@ impl Settings {
         }
         if self.share.token.trim().is_empty() {
             self.share.token = generate_token();
+            changed = true;
+        }
+        if self.terminal.token.trim().is_empty() {
+            self.terminal.token = generate_token();
             changed = true;
         }
         changed
@@ -140,15 +159,66 @@ impl Settings {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CoreSettings {
-    #[serde(default = "default_core_bind")]
+pub struct DaemonSettings {
+    #[serde(default = "default_daemon_socket")]
+    pub socket: String,
+    #[serde(default = "default_daemon_terminal_socket")]
+    pub terminal_socket: String,
+}
+
+impl DaemonSettings {
+    fn validate(&self) -> Result<()> {
+        if self.socket.trim().is_empty() {
+            anyhow::bail!("daemon socket must not be empty");
+        }
+        if self.terminal_socket.trim().is_empty() {
+            anyhow::bail!("daemon terminal_socket must not be empty");
+        }
+        Ok(())
+    }
+
+    fn ensure_defaults(&mut self) -> bool {
+        let mut changed = false;
+        if self.socket.trim().is_empty() {
+            self.socket = default_daemon_socket();
+            changed = true;
+        }
+        if self.terminal_socket.trim().is_empty() {
+            self.terminal_socket = default_daemon_terminal_socket();
+            changed = true;
+        }
+        changed
+    }
+}
+
+impl Default for DaemonSettings {
+    fn default() -> Self {
+        Self {
+            socket: default_daemon_socket(),
+            terminal_socket: default_daemon_terminal_socket(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GatewaySettings {
+    #[serde(default = "default_gateway_bind")]
     pub bind: String,
 }
 
-impl Default for CoreSettings {
+impl GatewaySettings {
+    fn validate(&self) -> Result<()> {
+        if self.bind.trim().is_empty() {
+            anyhow::bail!("gateway bind must not be empty");
+        }
+        Ok(())
+    }
+}
+
+impl Default for GatewaySettings {
     fn default() -> Self {
         Self {
-            bind: default_core_bind(),
+            bind: default_gateway_bind(),
         }
     }
 }
@@ -281,11 +351,37 @@ impl Default for ShareSettings {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub token: String,
+}
+
+impl TerminalSettings {
+    fn validate(&self) -> Result<()> {
+        if self.enabled && self.token.trim().is_empty() {
+            anyhow::bail!("terminal token must not be empty when terminal is enabled");
+        }
+        if self.token.chars().any(|ch| matches!(ch, '\r' | '\n')) {
+            anyhow::bail!("terminal token must not contain newlines");
+        }
+        Ok(())
+    }
+
+    pub fn token_configured(&self) -> bool {
+        !self.token.trim().is_empty()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ConfiguredRemote {
     pub name: String,
     pub base_url: String,
     pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_token: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -296,6 +392,7 @@ struct ConfiguredRemoteWire {
     base_url: Option<String>,
     addr: Option<String>,
     token: String,
+    terminal_token: Option<String>,
     #[serde(default = "default_true")]
     enabled: bool,
 }
@@ -314,6 +411,7 @@ impl<'de> Deserialize<'de> for ConfiguredRemote {
             name: wire.name,
             base_url,
             token: wire.token,
+            terminal_token: wire.terminal_token,
             enabled: wire.enabled,
         })
     }
@@ -325,6 +423,7 @@ impl From<RemoteEndpoint> for ConfiguredRemote {
             name: remote.name,
             base_url: remote.base_url,
             token: remote.token,
+            terminal_token: None,
             enabled: true,
         }
     }
@@ -481,8 +580,32 @@ fn default_true() -> bool {
     true
 }
 
-fn default_core_bind() -> String {
+fn default_gateway_bind() -> String {
     "0.0.0.0:8787".to_string()
+}
+
+fn default_daemon_socket() -> String {
+    dirs::home_dir()
+        .map(|home| {
+            home.join(".config")
+                .join("coca")
+                .join("daemon.sock")
+                .to_string_lossy()
+                .to_string()
+        })
+        .unwrap_or_else(|| "daemon.sock".to_string())
+}
+
+fn default_daemon_terminal_socket() -> String {
+    dirs::home_dir()
+        .map(|home| {
+            home.join(".config")
+                .join("coca")
+                .join("daemon.terminal.sock")
+                .to_string_lossy()
+                .to_string()
+        })
+        .unwrap_or_else(|| "daemon.terminal.sock".to_string())
 }
 
 fn default_ai_provider() -> String {
@@ -543,13 +666,22 @@ mod tests {
                 "share": {
                     "base_url": "http://192.168.1.20:8787",
                     "token": "secret"
+                },
+                "terminal": {
+                    "enabled": true,
+                    "token": "terminal-secret"
                 }
             }"#,
         )
         .unwrap();
 
         assert!(settings.remotes[0].enabled);
-        assert_eq!(settings.core.bind, "0.0.0.0:8787");
+        assert_eq!(settings.gateway.bind, "0.0.0.0:8787");
+        assert!(settings.daemon.socket.ends_with("daemon.sock"));
+        assert!(settings
+            .daemon
+            .terminal_socket
+            .ends_with("daemon.terminal.sock"));
         assert_eq!(settings.ai.base_url, "https://api.openai.com/v1");
         assert_eq!(settings.ai.model, "gpt-4o-mini");
         assert!(settings.ai.api_key.is_empty());
@@ -558,16 +690,24 @@ mod tests {
         assert!(settings.launch_default(LaunchMode::Fork, LaunchOptionKind::UseCurrentDir));
         assert_eq!(settings.share.base_url, "http://192.168.1.20:8787");
         assert_eq!(settings.share.token, "secret");
+        assert!(settings.terminal.enabled);
+        assert_eq!(settings.terminal.token, "terminal-secret");
     }
 
     #[test]
-    fn ensure_defaults_generates_share_token() {
+    fn ensure_defaults_generates_share_and_terminal_tokens() {
         let mut settings = Settings::default();
 
         assert!(settings.share.token.is_empty());
+        assert!(settings.terminal.token.is_empty());
         assert!(settings.ensure_defaults());
 
-        assert_eq!(settings.core.bind, "0.0.0.0:8787");
+        assert_eq!(settings.gateway.bind, "0.0.0.0:8787");
+        assert!(settings.daemon.socket.ends_with("daemon.sock"));
+        assert!(settings
+            .daemon
+            .terminal_socket
+            .ends_with("daemon.terminal.sock"));
         assert_eq!(settings.ai.base_url, "https://api.openai.com/v1");
         assert_eq!(settings.ai.model, "gpt-4o-mini");
         assert!(settings.ai.api_key.is_empty());
@@ -575,6 +715,13 @@ mod tests {
         assert_eq!(settings.share.token.len(), 64);
         assert!(settings
             .share
+            .token
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit()));
+        assert_eq!(settings.terminal.token.len(), 64);
+        assert!(!settings.terminal.enabled);
+        assert!(settings
+            .terminal
             .token
             .chars()
             .all(|ch| ch.is_ascii_hexdigit()));
@@ -625,6 +772,31 @@ mod tests {
     }
 
     #[test]
+    fn validates_terminal_settings_and_remote_terminal_tokens() {
+        let mut settings = Settings::default();
+        settings.ensure_defaults();
+
+        assert!(settings.validate().is_ok());
+
+        settings.terminal.token = "line\nbreak".to_string();
+        assert!(settings.validate().is_err());
+
+        settings.terminal.token.clear();
+        settings.terminal.enabled = true;
+        assert!(settings.validate().is_err());
+
+        settings.terminal.token = "terminal-secret".to_string();
+        settings.remotes.push(ConfiguredRemote {
+            name: "work".to_string(),
+            base_url: "http://127.0.0.1:8787".to_string(),
+            token: "secret".to_string(),
+            terminal_token: Some(" ".to_string()),
+            enabled: true,
+        });
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
     fn saves_and_loads_settings() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
@@ -633,6 +805,7 @@ mod tests {
             name: "work".to_string(),
             base_url: "http://127.0.0.1:8787".to_string(),
             token: "secret".to_string(),
+            terminal_token: Some("terminal-secret".to_string()),
             enabled: false,
         });
         settings.set_launch_default(LaunchMode::Fork, LaunchOptionKind::Yolo, true);

@@ -6,9 +6,14 @@ description = "Web frontend for coca."
 
 [dependencies]
 anyhow = "1.0"
+base64 = "0.22"
 coca-app = { path = "../coca-app" }
+coca-ipc = { path = "../coca-ipc" }
+coca-protocol = { path = "../coca-protocol" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha1 = "0.10"
 
 [dev-dependencies]
 coca-core = { path = "../coca-core" }
+tempfile = "3.14"

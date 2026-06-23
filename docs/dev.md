@@ -45,28 +45,28 @@ The default persistent settings file is:
 ~/.config/coca/settings.json
 ```
 
-It stores core bind settings, configured remotes, origin visibility, share settings, and the default launch options used by the `s` execute and `f` fork dialogs. The TUI settings page is opened with `,`. `--remote-config` remains available as a remotes-only override, and an existing `~/.config/coca/remotes.json` is still read when `settings.json` does not exist.
+It stores daemon socket settings, gateway bind settings, configured remotes,
+origin visibility, share settings, terminal settings, and the default launch
+options used by the `s` execute and `f` fork dialogs. The TUI settings page is
+opened with `,`. `--remote-config` remains available as a remotes-only
+override, and an existing `~/.config/coca/remotes.json` is still read when
+`settings.json` does not exist.
 
-Run the read-only core server:
+Run the local daemon:
 
 ```sh
-cargo run -- core
+cargo run -- daemon
+cargo run -- daemon --socket ~/.config/coca/daemon.sock
 ```
 
-Override the core bind for this run:
-
-```sh
-cargo run -- core --bind 127.0.0.1:8787
-```
-
-Build and run the React Web frontend:
+Build and run the React Web frontend through the browser gateway:
 
 ```sh
 cd app/web
 npm install
 npm run build
 cd ../..
-cargo run -- web --bind 127.0.0.1:8787
+cargo run -- gateway --bind 127.0.0.1:8787
 ```
 
 Open the Web frontend and enter `share.token`, or pass it once as a query token:
@@ -75,29 +75,27 @@ Open the Web frontend and enter `share.token`, or pass it once as a query token:
 http://127.0.0.1:8787/?token=<secret>
 ```
 
-During frontend development, run Vite and proxy API calls to `coca web`:
+During frontend development, run Vite and proxy API calls to `coca gateway`:
 
 ```sh
 cd app/web
 npm run dev
 ```
 
-Run the local JSON-RPC daemon for frontend/core IPC:
+The browser app talks to `coca gateway`. Gateway proxies business and terminal
+runtime APIs to `coca daemon`; it does not own provider parsing or terminal
+lifecycle. The TUI follows the same authority boundary through a daemon client.
 
-```sh
-cargo run -- daemon
-cargo run -- daemon --socket ~/.config/coca/core.sock
-```
-
-The default TUI path also uses the JSON-RPC core router through an in-process client, so UI code follows the same boundary that the local daemon exposes over a socket.
-
-In the TUI, press `,` to edit `core.bind`, `share.base_url`, and `share.token`, then press `u` on a local session to show its share URL. Restart `coca core` after changing core bind settings, and restart `coca web` after changing share settings used by the running Web host.
+In the TUI, press `,` to edit gateway, share, terminal, and launch settings,
+then press `u` on a local session to show its share URL. Restart `coca gateway`
+after changing gateway bind or share settings used by the running browser
+gateway.
 
 Show CLI help:
 
 ```sh
 cargo run -- --help
-cargo run -- core --help
+cargo run -- gateway --help
 ```
 
 ## Verification
@@ -216,12 +214,12 @@ The workspace is organized by responsibility:
 
 - `crates/coca-core/`: normalized models, provider loaders, session catalog primitives, settings persistence primitives, remote loading, and launch construction primitives.
 - `crates/coca-app/`: app-layer use cases and frontend/API DTOs.
-- `crates/coca-protocol/`: JSON-RPC wire types for frontend/core communication.
+- `crates/coca-protocol/`: JSON-RPC wire types for frontend/daemon communication.
 - `crates/coca-ipc/`: local IPC framing and transport helpers.
-- `crates/coca-daemon/`: core host, RPC router, and server adapters.
-- `crates/coca-tui/`: app state, key handling, rendering, view helpers, and the frontend `CoreClient` contract.
-- `crates/coca-web/`: JSON API and static asset host for Web.
-- `app/web/`: React + TypeScript Web frontend.
+- `crates/coca-daemon/`: local authoritative service host, RPC router, terminal runtime, and server adapters.
+- `crates/coca-tui/`: app state, key handling, rendering, view helpers, and the frontend daemon-client contract.
+- `crates/coca-web/`: browser gateway host for HTTP APIs, WebSocket bridges, and static assets.
+- `app/web/`: React + TypeScript browser frontend that talks to the gateway.
 - `app/gui/`: reserved for a future desktop GUI frontend.
 - `app/tui/`: reserved for a possible future terminal frontend location; current TUI code remains in `crates/coca-tui/`.
 - `src/`: root CLI shell, frontend RPC client adapter, and final process execution bridge.

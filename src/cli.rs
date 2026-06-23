@@ -71,52 +71,18 @@ impl From<ProviderArg> for ProviderFilter {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    Core(CoreArgs),
     Daemon(DaemonArgs),
-    Web(WebArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct CoreArgs {
-    #[arg(long, value_name = "HOST:PORT")]
-    bind: Option<String>,
-
-    #[arg(long, value_name = "DIR")]
-    codex_home: Option<PathBuf>,
-
-    #[arg(long, value_name = "DIR")]
-    claude_home: Option<PathBuf>,
-
-    #[arg(long, value_enum, default_value_t = ProviderArg::All)]
-    provider: ProviderArg,
-}
-
-impl CoreArgs {
-    pub fn bind(&self) -> Option<String> {
-        self.bind.clone()
-    }
-
-    pub fn codex_home(&self) -> Option<PathBuf> {
-        self.codex_home
-            .clone()
-            .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
-    }
-
-    pub fn claude_home(&self) -> Option<PathBuf> {
-        self.claude_home
-            .clone()
-            .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
-    }
-
-    pub fn provider_filter(&self) -> ProviderFilter {
-        self.provider.into()
-    }
+    Gateway(GatewayArgs),
+    Tui,
 }
 
 #[derive(Debug, Args)]
 pub struct DaemonArgs {
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
+
+    #[arg(long, value_name = "PATH")]
+    terminal_socket: Option<PathBuf>,
 
     #[arg(long, value_name = "DIR")]
     codex_home: Option<PathBuf>,
@@ -130,7 +96,11 @@ pub struct DaemonArgs {
 
 impl DaemonArgs {
     pub fn socket(&self) -> Option<PathBuf> {
-        self.socket.clone().or_else(default_daemon_socket_path)
+        self.socket.clone()
+    }
+
+    pub fn terminal_socket(&self) -> Option<PathBuf> {
+        self.terminal_socket.clone()
     }
 
     pub fn codex_home(&self) -> Option<PathBuf> {
@@ -151,24 +121,21 @@ impl DaemonArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct WebArgs {
+pub struct GatewayArgs {
     #[arg(long, value_name = "HOST:PORT")]
     bind: Option<String>,
 
     #[arg(long, value_name = "DIR")]
     static_dir: Option<PathBuf>,
 
-    #[arg(long, value_name = "DIR")]
-    codex_home: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    daemon_socket: Option<PathBuf>,
 
-    #[arg(long, value_name = "DIR")]
-    claude_home: Option<PathBuf>,
-
-    #[arg(long, value_enum, default_value_t = ProviderArg::All)]
-    provider: ProviderArg,
+    #[arg(long, value_name = "PATH")]
+    terminal_socket: Option<PathBuf>,
 }
 
-impl WebArgs {
+impl GatewayArgs {
     pub fn bind(&self) -> Option<String> {
         self.bind.clone()
     }
@@ -177,23 +144,11 @@ impl WebArgs {
         self.static_dir.clone()
     }
 
-    pub fn codex_home(&self) -> Option<PathBuf> {
-        self.codex_home
-            .clone()
-            .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+    pub fn daemon_socket(&self) -> Option<PathBuf> {
+        self.daemon_socket.clone()
     }
 
-    pub fn claude_home(&self) -> Option<PathBuf> {
-        self.claude_home
-            .clone()
-            .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
+    pub fn terminal_socket(&self) -> Option<PathBuf> {
+        self.terminal_socket.clone()
     }
-
-    pub fn provider_filter(&self) -> ProviderFilter {
-        self.provider.into()
-    }
-}
-
-fn default_daemon_socket_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".config").join("coca").join("core.sock"))
 }

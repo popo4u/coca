@@ -2,7 +2,7 @@
 
 This directory holds user-facing frontend applications.
 
-- `web/`: React + TypeScript browser frontend served by `crates/coca-web`.
+- `web/`: React + TypeScript browser frontend served by the coca gateway host.
 - `gui/`: reserved for a future desktop GUI frontend.
 - `tui/`: reserved for a possible future terminal frontend location.
 

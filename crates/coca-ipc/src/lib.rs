@@ -50,6 +50,8 @@ pub mod unix {
     use std::os::unix::fs::FileTypeExt;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::Path;
+    use std::sync::Arc;
+    use std::thread;
 
     use anyhow::{Context, Result};
     use coca_protocol::{JsonRpcRequest, JsonRpcResponse};
@@ -83,6 +85,35 @@ pub mod unix {
         let mut stream = UnixStream::connect(path)?;
         write_json_frame(&mut stream, request)?;
         read_json_frame(&mut stream)
+    }
+
+    pub fn serve_stream<F>(path: &Path, handler: F) -> Result<()>
+    where
+        F: Fn(UnixStream) -> Result<()> + Send + Sync + 'static,
+    {
+        let listener = bind_listener(path)?;
+        let handler = Arc::new(handler);
+        for stream in listener.incoming() {
+            let stream = stream.context("failed to accept IPC stream connection")?;
+            let handler = handler.clone();
+            thread::spawn(move || {
+                if let Err(err) = handler(stream) {
+                    eprintln!("coca IPC stream connection failed: {err:#}");
+                }
+            });
+        }
+        Ok(())
+    }
+
+    pub fn serve_stream_one<F>(path: &Path, mut handler: F) -> Result<()>
+    where
+        F: FnMut(UnixStream) -> Result<()>,
+    {
+        let listener = bind_listener(path)?;
+        let (stream, _) = listener
+            .accept()
+            .context("failed to accept IPC stream connection")?;
+        handler(stream)
     }
 
     fn bind_listener(path: &Path) -> Result<UnixListener> {
@@ -128,7 +159,7 @@ mod tests {
 
     #[test]
     fn json_frame_roundtrips_request() {
-        let request = JsonRpcRequest::new(1, methods::CORE_PING, None);
+        let request = JsonRpcRequest::new(1, methods::DAEMON_PING, None);
         let mut buffer = Vec::new();
 
         write_json_frame(&mut buffer, &request).unwrap();
@@ -154,7 +185,7 @@ mod tests {
         use coca_protocol::{JsonRpcResponse, RpcId};
 
         let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("core.sock");
+        let socket = dir.path().join("daemon.sock");
         let server_socket = socket.clone();
         let handle = std::thread::spawn(move || {
             super::unix::serve_one(&server_socket, |request| {
@@ -164,10 +195,52 @@ mod tests {
         });
 
         wait_for_socket(&socket);
-        let request = JsonRpcRequest::new(RpcId::Number(1), methods::CORE_PING, None);
+        let request = JsonRpcRequest::new(RpcId::Number(1), methods::DAEMON_PING, None);
         let response = super::unix::roundtrip(&socket, &request).unwrap();
 
         assert_eq!(response.result.unwrap(), json!({"pong": true}));
+        handle.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_stream_keeps_connection_open_for_multiple_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("terminal.sock");
+        let server_socket = socket.clone();
+        let handle = std::thread::spawn(move || {
+            super::unix::serve_stream_one(&server_socket, |mut stream| {
+                let first: JsonRpcRequest = read_json_frame(&mut stream)?;
+                write_json_frame(
+                    &mut stream,
+                    &JsonRpcResponse::success(first.id, json!({"n": 1})),
+                )?;
+                let second: JsonRpcRequest = read_json_frame(&mut stream)?;
+                write_json_frame(
+                    &mut stream,
+                    &JsonRpcResponse::success(second.id, json!({"n": 2})),
+                )
+            })
+            .unwrap();
+        });
+
+        wait_for_socket(&socket);
+        let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        write_json_frame(
+            &mut stream,
+            &JsonRpcRequest::new(1, methods::DAEMON_PING, None),
+        )
+        .unwrap();
+        let first: JsonRpcResponse = read_json_frame(&mut stream).unwrap();
+        write_json_frame(
+            &mut stream,
+            &JsonRpcRequest::new(2, methods::DAEMON_PING, None),
+        )
+        .unwrap();
+        let second: JsonRpcResponse = read_json_frame(&mut stream).unwrap();
+
+        assert_eq!(first.result.unwrap(), json!({"n": 1}));
+        assert_eq!(second.result.unwrap(), json!({"n": 2}));
         handle.join().unwrap();
     }
 

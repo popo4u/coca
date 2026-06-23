@@ -6,7 +6,7 @@ use coca_core::launch::{LaunchMode, LaunchOption, ResumeTarget};
 use coca_core::model::Session;
 use coca_core::settings::Settings;
 
-pub trait CoreClient {
+pub trait DaemonClient {
     fn session_catalog(&mut self) -> Result<SessionCatalog>;
     fn settings(&mut self) -> Result<Settings>;
     fn update_settings(&mut self, settings: &Settings) -> Result<SettingsUpdate>;

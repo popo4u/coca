@@ -16,9 +16,9 @@ use coca_core::launch::{LaunchMode, LaunchOption, LaunchOptionKind, ResumeTarget
 use coca_core::model::{ProviderFilter, ProviderKind, Session, SessionOrigin};
 use coca_core::settings::Settings;
 
-use crate::core_client::CoreClient;
+use crate::daemon_client::DaemonClient;
 #[cfg(test)]
-use crate::core_client::SettingsUpdate;
+use crate::daemon_client::SettingsUpdate;
 #[cfg(test)]
 use anyhow::anyhow;
 #[cfg(test)]
@@ -27,11 +27,11 @@ use coca_app::{AppOptions, AppService};
 use coca_core::catalog::SessionCatalog;
 
 pub fn run_tui(
-    mut core_client: Box<dyn CoreClient>,
+    mut daemon_client: Box<dyn DaemonClient>,
     initial_filter: ProviderFilter,
 ) -> Result<Option<ResumeTarget>> {
-    let settings = core_client.settings()?;
-    let catalog = core_client.session_catalog()?;
+    let settings = daemon_client.settings()?;
+    let catalog = daemon_client.session_catalog()?;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -46,7 +46,7 @@ pub fn run_tui(
         initial_filter,
         catalog.warnings,
         settings,
-        core_client,
+        daemon_client,
     );
     guard.restore()?;
     result
@@ -84,9 +84,10 @@ fn run_loop(
     initial_filter: ProviderFilter,
     warnings: Vec<String>,
     settings: Settings,
-    core_client: Box<dyn CoreClient>,
+    daemon_client: Box<dyn DaemonClient>,
 ) -> Result<Option<ResumeTarget>> {
-    let mut app = App::new_with_settings(sessions, initial_filter, warnings, settings, core_client);
+    let mut app =
+        App::new_with_settings(sessions, initial_filter, warnings, settings, daemon_client);
     loop {
         terminal.draw(|frame| app.render(frame))?;
         if !event::poll(Duration::from_millis(150))? {
@@ -128,7 +129,7 @@ pub(super) struct App {
     pub(super) current_cwd: PathBuf,
     pub(super) status_message: Option<String>,
     pub(super) settings: Settings,
-    pub(super) core_client: Box<dyn CoreClient>,
+    pub(super) daemon_client: Box<dyn DaemonClient>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -170,7 +171,7 @@ pub(super) struct HelpPage;
 pub(super) enum ConfigItem {
     OriginLocal,
     OriginRemote(String),
-    CoreBind,
+    GatewayBind,
     LaunchDefault {
         mode: LaunchMode,
         kind: LaunchOptionKind,
@@ -203,7 +204,7 @@ impl App {
             provider_filter,
             warnings,
             settings.clone(),
-            Box::new(TestCoreClient::new(sessions, client_settings, false)),
+            Box::new(TestDaemonClient::new(sessions, client_settings, false)),
         )
     }
 
@@ -212,14 +213,14 @@ impl App {
         provider_filter: ProviderFilter,
         warnings: Vec<String>,
         settings: Settings,
-        core_client: Box<dyn CoreClient>,
+        daemon_client: Box<dyn DaemonClient>,
     ) -> Self {
         Self::new_with_settings_and_client(
             sessions,
             provider_filter,
             warnings,
             settings,
-            core_client,
+            daemon_client,
         )
     }
 
@@ -228,7 +229,7 @@ impl App {
         provider_filter: ProviderFilter,
         warnings: Vec<String>,
         mut settings: Settings,
-        core_client: Box<dyn CoreClient>,
+        daemon_client: Box<dyn DaemonClient>,
     ) -> Self {
         settings.ensure_defaults();
         let mut app = Self {
@@ -253,7 +254,7 @@ impl App {
                 Some(format!("Remote load warnings: {}", warnings.join("; ")))
             },
             settings,
-            core_client,
+            daemon_client,
         };
         app.apply_filter();
         app
@@ -341,7 +342,7 @@ impl App {
         let mut items = vec![ConfigItem::OriginLocal];
         items.extend(remote_names.into_iter().map(ConfigItem::OriginRemote));
         items.extend([
-            ConfigItem::CoreBind,
+            ConfigItem::GatewayBind,
             ConfigItem::ShareBaseUrl,
             ConfigItem::ShareToken,
             ConfigItem::LaunchDefault {
@@ -381,14 +382,14 @@ pub(super) fn session_key(session: &Session) -> SessionKey {
 }
 
 #[cfg(test)]
-struct TestCoreClient {
+struct TestDaemonClient {
     sessions: Vec<Session>,
     settings: Settings,
     persisted: bool,
 }
 
 #[cfg(test)]
-impl TestCoreClient {
+impl TestDaemonClient {
     fn new(sessions: Vec<Session>, settings: Settings, persisted: bool) -> Self {
         Self {
             sessions,
@@ -410,7 +411,7 @@ impl TestCoreClient {
 }
 
 #[cfg(test)]
-impl CoreClient for TestCoreClient {
+impl DaemonClient for TestDaemonClient {
     fn session_catalog(&mut self) -> Result<SessionCatalog> {
         Ok(SessionCatalog {
             sessions: self.sessions.clone(),
@@ -857,12 +858,12 @@ mod tests {
         assert_eq!(app.settings.share.base_url, "http://192.168.1.20:8787");
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Settings saved. Restart coca web for changes to take effect.")
+            Some("Settings saved. Restart coca gateway for changes to take effect.")
         );
     }
 
     #[test]
-    fn config_page_edits_core_bind() {
+    fn config_page_edits_gateway_bind() {
         let mut app = App::new_with_warnings(
             vec![session(ProviderKind::Claude, "sid", "hello claude")],
             ProviderFilter::All,
@@ -876,7 +877,7 @@ mod tests {
         assert_eq!(
             app.config_edit,
             Some(ConfigEdit {
-                item: ConfigItem::CoreBind,
+                item: ConfigItem::GatewayBind,
                 input: "0.0.0.0:8787".to_string()
             })
         );
@@ -887,10 +888,10 @@ mod tests {
         }
         app.handle_key(KeyEvent::from(KeyCode::Enter));
 
-        assert_eq!(app.settings.core.bind, "127.0.0.1:9999");
+        assert_eq!(app.settings.gateway.bind, "127.0.0.1:9999");
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Settings saved. Restart coca web for changes to take effect.")
+            Some("Settings saved. Restart coca gateway for changes to take effect.")
         );
     }
 

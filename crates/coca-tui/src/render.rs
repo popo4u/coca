@@ -353,20 +353,20 @@ impl App {
             Line::raw(""),
         ];
 
-        let mut core_header_added = false;
+        let mut gateway_header_added = false;
         let mut share_header_added = false;
         let mut defaults_header_added = false;
         for (idx, item) in items.iter().enumerate() {
-            if matches!(item, ConfigItem::CoreBind) && !core_header_added {
+            if matches!(item, ConfigItem::GatewayBind) && !gateway_header_added {
                 lines.push(Line::raw(""));
                 lines.push(Line::styled(
-                    "Core",
+                    "Gateway",
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ));
                 lines.push(Line::raw(""));
-                core_header_added = true;
+                gateway_header_added = true;
             }
             if matches!(item, ConfigItem::ShareBaseUrl | ConfigItem::ShareToken)
                 && !share_header_added
@@ -462,7 +462,7 @@ impl App {
         match item {
             ConfigItem::OriginLocal => self.settings.origin_visible(&SessionOrigin::Local),
             ConfigItem::OriginRemote(name) => self.settings.remote_enabled(name),
-            ConfigItem::CoreBind => false,
+            ConfigItem::GatewayBind => false,
             ConfigItem::LaunchDefault { mode, kind } => self.settings.launch_default(*mode, *kind),
             ConfigItem::ShareBaseUrl | ConfigItem::ShareToken => false,
         }
@@ -472,7 +472,7 @@ impl App {
         match item {
             ConfigItem::OriginLocal => "origin local".to_string(),
             ConfigItem::OriginRemote(name) => format!("origin {name}"),
-            ConfigItem::CoreBind => format!("core bind: {}", self.settings.core.bind),
+            ConfigItem::GatewayBind => format!("gateway bind: {}", self.settings.gateway.bind),
             ConfigItem::ShareBaseUrl => format!(
                 "share base URL: {}",
                 display_setting_value(&self.settings.share.base_url)
@@ -501,7 +501,7 @@ impl App {
 
     fn config_edit_title(&self, item: &ConfigItem) -> &'static str {
         match item {
-            ConfigItem::CoreBind => "core.bind",
+            ConfigItem::GatewayBind => "gateway.bind",
             ConfigItem::ShareBaseUrl => "share.base_url",
             ConfigItem::ShareToken => "share.token",
             ConfigItem::OriginLocal
@@ -512,9 +512,9 @@ impl App {
 
     fn config_edit_hint(&self, item: &ConfigItem) -> &'static str {
         match item {
-            ConfigItem::CoreBind => "Example: 0.0.0.0:8787",
+            ConfigItem::GatewayBind => "Example: 0.0.0.0:8787",
             ConfigItem::ShareBaseUrl => "Example: http://192.168.1.20:8787",
-            ConfigItem::ShareToken => "Used by coca web for API and share links.",
+            ConfigItem::ShareToken => "Used by coca gateway for API and share links.",
             ConfigItem::OriginLocal
             | ConfigItem::OriginRemote(_)
             | ConfigItem::LaunchDefault { .. } => "",

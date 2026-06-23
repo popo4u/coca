@@ -10,14 +10,14 @@ use coca_protocol::{
     LaunchModeWire, LaunchOptionKindWire, LaunchOptionWire, LaunchOptionsParams,
     LaunchPrepareParams, PreparedLaunch, SessionRef,
 };
-use coca_tui::{CoreClient, SettingsUpdate};
+use coca_tui::{DaemonClient, SettingsUpdate};
 
-pub struct RpcCoreClient {
+pub struct RpcDaemonClient {
     client: LocalRpcClient,
     settings_path: Option<PathBuf>,
 }
 
-impl RpcCoreClient {
+impl RpcDaemonClient {
     pub fn new(options: RpcDaemonOptions) -> Self {
         let settings_path = options.settings_path.clone();
         Self {
@@ -27,7 +27,7 @@ impl RpcCoreClient {
     }
 }
 
-impl CoreClient for RpcCoreClient {
+impl DaemonClient for RpcDaemonClient {
     fn session_catalog(&mut self) -> Result<SessionCatalog> {
         self.client.session_catalog()
     }

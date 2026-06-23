@@ -1,16 +1,17 @@
 mod cli;
-mod core_client;
+mod daemon_client;
 mod process;
 
-use anyhow::{Context, Result};
-use coca_app::AppOptions;
+use std::path::PathBuf;
+
+use anyhow::Result;
 use coca_core::settings::load_settings_for_cli;
-use coca_daemon::{serve as serve_core, serve_rpc, CoreOptions, RpcDaemonOptions};
+use coca_daemon::{serve_daemon, RpcDaemonOptions};
 use coca_tui::run_tui;
-use coca_web::{serve as serve_web, WebCache, WebOptions};
+use coca_web::{serve as serve_gateway, GatewayOptions};
 
 use crate::cli::{Cli, Command};
-use crate::core_client::RpcCoreClient;
+use crate::daemon_client::RpcDaemonClient;
 use crate::process::exec_resume;
 
 fn main() -> Result<()> {
@@ -18,19 +19,16 @@ fn main() -> Result<()> {
     let (settings, settings_path) = load_settings_for_cli(cli.remote_config().as_deref())?;
     if let Some(command) = cli.command() {
         return match command {
-            Command::Core(args) => serve_core(CoreOptions {
-                bind: args.bind().unwrap_or_else(|| settings.core.bind.clone()),
-                token: settings.share.token.clone(),
-                codex_home: args.codex_home(),
-                claude_home: args.claude_home(),
-                provider_filter: args.provider_filter(),
-            }),
             Command::Daemon(args) => {
-                let socket = args.socket().context(
-                    "failed to resolve daemon socket path: home directory was not found",
-                )?;
-                serve_rpc(
+                let socket = args
+                    .socket()
+                    .unwrap_or_else(|| PathBuf::from(settings.daemon.socket.clone()));
+                let terminal_socket = args
+                    .terminal_socket()
+                    .unwrap_or_else(|| PathBuf::from(settings.daemon.terminal_socket.clone()));
+                serve_daemon(
                     &socket,
+                    &terminal_socket,
                     RpcDaemonOptions {
                         settings,
                         settings_path: Some(settings_path),
@@ -40,24 +38,39 @@ fn main() -> Result<()> {
                     },
                 )
             }
-            Command::Web(args) => serve_web(WebOptions {
-                bind: args.bind().unwrap_or_else(|| settings.core.bind.clone()),
-                app: AppOptions {
-                    settings,
-                    settings_path: Some(settings_path),
-                    codex_home: args.codex_home(),
-                    claude_home: args.claude_home(),
-                    provider_filter: args.provider_filter(),
-                    database_path: None,
-                },
-                static_dir: args.static_dir().unwrap_or_else(default_web_static_dir),
-                cache: WebCache::default(),
-            }),
+            Command::Gateway(args) => {
+                let bind = args.bind().unwrap_or_else(|| settings.gateway.bind.clone());
+                let daemon_socket = args
+                    .daemon_socket()
+                    .unwrap_or_else(|| PathBuf::from(settings.daemon.socket.clone()));
+                let terminal_socket = args
+                    .terminal_socket()
+                    .unwrap_or_else(|| PathBuf::from(settings.daemon.terminal_socket.clone()));
+                serve_gateway(GatewayOptions {
+                    bind,
+                    read_token: settings.share.token.clone(),
+                    share_base_url: settings.share.base_url.clone(),
+                    terminal_enabled: settings.terminal.enabled,
+                    terminal_token: settings.terminal.token.clone(),
+                    static_dir: args.static_dir().unwrap_or_else(default_web_static_dir),
+                    daemon_socket: Some(daemon_socket),
+                    terminal_socket: Some(terminal_socket),
+                })
+            }
+            Command::Tui => run_tui_command(&cli, settings, settings_path),
         };
     }
 
+    run_tui_command(&cli, settings, settings_path)
+}
+
+fn run_tui_command(
+    cli: &Cli,
+    settings: coca_core::settings::Settings,
+    settings_path: std::path::PathBuf,
+) -> Result<()> {
     let provider_filter = cli.provider_filter();
-    let core_client = RpcCoreClient::new(RpcDaemonOptions {
+    let daemon_client = RpcDaemonClient::new(RpcDaemonOptions {
         settings,
         settings_path: Some(settings_path),
         codex_home: cli.codex_home(),
@@ -65,7 +78,7 @@ fn main() -> Result<()> {
         provider_filter,
     });
 
-    if let Some(target) = run_tui(Box::new(core_client), provider_filter)? {
+    if let Some(target) = run_tui(Box::new(daemon_client), provider_filter)? {
         exec_resume(target)?;
     }
 

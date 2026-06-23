@@ -1,3 +1,18 @@
+# Superseded / Deprecated Notice
+
+This is a historical plan. Do not use the runtime vocabulary below as the
+current target architecture.
+
+Current authoritative plans:
+
+- `.ai/runtime-process-architecture-plan.md`
+- `.ai/terminal-integration-v1.md`
+
+Current process view uses `coca daemon`, `coca gateway`, `coca tui`, and
+`coca gui`. `coca-app` and `coca-core` are code layers only, not runtime
+process roles. Historical terms below such as `coca core`, `coca web`,
+`CoreClient`, `core.bind`, and `frontend/core` are preserved for traceability.
+
 # Web/App Refactor Status
 
 ## Goal

@@ -9,6 +9,15 @@ export type SessionSummary = {
   model: string | null;
   message_count: number;
   first_user_message: string | null;
+  terminal: TerminalCapability;
+};
+
+export type TerminalCapability = {
+  enabled: boolean;
+  can_resume: boolean;
+  can_fork: boolean;
+  unavailable_code: string | null;
+  unavailable_message: string | null;
 };
 
 export type CatalogCounts = {
@@ -40,11 +49,19 @@ export type ConfigSummary = {
   service: string;
   version: string;
   bind: string;
-  core_bind: string;
+  gateway_bind: string;
   ai: AiSummary;
   share: {
     base_url: string;
     token_configured: boolean;
+  };
+  terminal: {
+    enabled: boolean;
+    token_configured: boolean;
+    daemon_available: boolean;
+    terminal_socket_available: boolean;
+    unavailable_code: string | null;
+    unavailable_message: string | null;
   };
   remotes: Array<{
     name: string;
@@ -52,6 +69,10 @@ export type ConfigSummary = {
     enabled: boolean;
     visible: boolean;
     token_configured: boolean;
+    terminal_token_configured: boolean;
+    terminal_ready: boolean;
+    terminal_unavailable_code: string | null;
+    terminal_unavailable_message: string | null;
     session_count: number;
   }>;
   launch_defaults: {
@@ -103,4 +124,57 @@ export type SessionRef = {
 
 export type ShareLink = {
   url: string;
+};
+
+export type TerminalId = string;
+export type TerminalSeq = number;
+
+export type TerminalSize = {
+  cols: number;
+  rows: number;
+};
+
+export type TerminalMode = "Resume" | "Fork";
+export type TerminalState = "Starting" | "Running" | "Detached" | "Exited";
+
+export type TerminalExitInfo = {
+  code: number | null;
+  signal: string | null;
+};
+
+export type TerminalSessionSummary = {
+  terminal_id: TerminalId;
+  session: SessionRef;
+  mode: TerminalMode;
+  state: TerminalState;
+  attached_clients: number;
+  active_writer: string | null;
+  last_seq: TerminalSeq;
+  size: TerminalSize;
+  exit: TerminalExitInfo | null;
+};
+
+export type TerminalSessionsResponse = {
+  terminals: TerminalSessionSummary[];
+};
+
+export type TerminalClientFrame =
+  | { event: "terminal.open"; payload: { session: SessionRef; mode: TerminalMode; size: TerminalSize } }
+  | { event: "terminal.attach"; payload: { terminal_id: TerminalId; since_seq: TerminalSeq | null; size: TerminalSize } }
+  | { event: "terminal.input"; payload: { terminal_id: TerminalId; data_b64: string } }
+  | { event: "terminal.resize"; payload: { terminal_id: TerminalId; size: TerminalSize } }
+  | { event: "terminal.detach"; payload: { terminal_id: TerminalId } }
+  | { event: "terminal.close"; payload: { terminal_id: TerminalId; kill: boolean } };
+
+export type TerminalServerFrame =
+  | { event: "terminal.opened"; payload: { terminal: TerminalSessionSummary } }
+  | { event: "terminal.output"; payload: { terminal_id: TerminalId; seq: TerminalSeq; data_b64: string } }
+  | { event: "terminal.exit"; payload: { terminal_id: TerminalId; exit: TerminalExitInfo } }
+  | { event: "terminal.error"; payload: StructuredError & { request_id: string | null; terminal_id: TerminalId | null } };
+
+export type StructuredError = {
+  code: string;
+  message: string;
+  action?: string | null;
+  detail?: string | null;
 };

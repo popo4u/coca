@@ -1,30 +1,97 @@
-pub use coca_core::server::{serve, CoreOptions};
+pub mod terminal;
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use coca_app::{AppOptions, AppService};
+use coca_app::{AiSettingsUpdate, AppOptions, AppService};
 use coca_core::catalog::SessionCatalog;
 use coca_core::launch::{LaunchMode, LaunchOption, LaunchOptionKind};
 use coca_core::model::{ProviderFilter, ProviderKind, Session, SessionOrigin};
 use coca_core::settings::{save_settings, Settings};
 use coca_protocol::{
-    methods, CorePingResult, JsonRpcRequest, JsonRpcResponse, LaunchModeWire, LaunchOptionKindWire,
-    LaunchOptionWire, LaunchOptionsParams, LaunchPrepareParams, PreparedLaunch, RpcId,
-    SessionGetParams, SessionRef, SettingsUpdateParams, ShareUrlParams,
+    methods, AiSettingsUpdateParams, DaemonPingResult, JsonRpcRequest, JsonRpcResponse,
+    LaunchModeWire, LaunchOptionKindWire, LaunchOptionWire, LaunchOptionsParams,
+    LaunchPrepareParams, PreparedLaunch, RpcId, SessionGetParams, SessionRef,
+    SettingsSummaryParams, SettingsUpdateParams, ShareUrlParams, TerminalGetParams, TerminalId,
+    TerminalListResult, TerminalModeWire, TerminalOpen, TerminalSessionSummary,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 
+use crate::terminal::{
+    DaemonTerminalBackend, TerminalBackend, TerminalLaunchTarget, TerminalManager,
+    TerminalRuntimeError,
+};
+
 #[cfg(unix)]
 pub fn serve_rpc(socket_path: &std::path::Path, options: RpcDaemonOptions) -> Result<()> {
-    let mut daemon = RpcDaemon::new(options);
+    let mut daemon = RpcDaemon::with_state(DaemonState::new(options));
     coca_ipc::unix::serve(socket_path, move |request| daemon.handle_request(request))
 }
 
 #[cfg(not(unix))]
 pub fn serve_rpc(_socket_path: &std::path::Path, _options: RpcDaemonOptions) -> Result<()> {
     anyhow::bail!("local daemon IPC is not implemented on this platform yet")
+}
+
+#[cfg(unix)]
+pub fn serve_daemon(
+    rpc_socket_path: &std::path::Path,
+    terminal_socket_path: &std::path::Path,
+    options: RpcDaemonOptions,
+) -> Result<()> {
+    let state = DaemonState::new(options);
+    let terminal_state = state.clone();
+    let terminal_socket_path = terminal_socket_path.to_path_buf();
+    std::thread::spawn(move || {
+        if let Err(err) = serve_terminal_stream(&terminal_socket_path, terminal_state) {
+            eprintln!("coca daemon terminal stream failed: {err:#}");
+        }
+    });
+
+    let mut daemon = RpcDaemon::with_state(state);
+    coca_ipc::unix::serve(rpc_socket_path, move |request| {
+        daemon.handle_request(request)
+    })
+}
+
+#[cfg(not(unix))]
+pub fn serve_daemon(
+    _rpc_socket_path: &std::path::Path,
+    _terminal_socket_path: &std::path::Path,
+    _options: RpcDaemonOptions,
+) -> Result<()> {
+    anyhow::bail!("local daemon IPC is not implemented on this platform yet")
+}
+
+#[cfg(unix)]
+pub fn serve_terminal_stream<B>(socket_path: &std::path::Path, state: DaemonState<B>) -> Result<()>
+where
+    B: TerminalBackend + Send + 'static,
+{
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let next_client_id = AtomicU64::new(1);
+    let manager = state.terminal_manager();
+    coca_ipc::unix::serve_stream(socket_path, move |stream| {
+        let client_id = format!("client-{}", next_client_id.fetch_add(1, Ordering::Relaxed));
+        let resolver_state = state.clone();
+        terminal::handle_unix_stream(manager.clone(), client_id, stream, move |request| {
+            resolver_state.resolve_terminal_launch(request)
+        })
+    })
+}
+
+#[cfg(not(unix))]
+pub fn serve_terminal_stream<B>(
+    _socket_path: &std::path::Path,
+    _state: DaemonState<B>,
+) -> Result<()>
+where
+    B: TerminalBackend + Send + 'static,
+{
+    anyhow::bail!("local daemon terminal IPC is not implemented on this platform yet")
 }
 
 #[derive(Clone, Debug)]
@@ -36,14 +103,120 @@ pub struct RpcDaemonOptions {
     pub provider_filter: ProviderFilter,
 }
 
-#[derive(Clone, Debug)]
-pub struct RpcDaemon {
+#[derive(Debug)]
+pub struct DaemonState<B = DaemonTerminalBackend> {
     options: RpcDaemonOptions,
+    terminal_manager: Arc<Mutex<TerminalManager<B>>>,
 }
 
-impl RpcDaemon {
+impl<B> Clone for DaemonState<B> {
+    fn clone(&self) -> Self {
+        Self {
+            options: self.options.clone(),
+            terminal_manager: self.terminal_manager.clone(),
+        }
+    }
+}
+
+impl DaemonState<DaemonTerminalBackend> {
     pub fn new(options: RpcDaemonOptions) -> Self {
-        Self { options }
+        Self::with_backend(options, DaemonTerminalBackend::new())
+    }
+}
+
+impl<B> DaemonState<B>
+where
+    B: TerminalBackend,
+{
+    pub fn with_backend(options: RpcDaemonOptions, backend: B) -> Self {
+        Self {
+            options,
+            terminal_manager: Arc::new(Mutex::new(TerminalManager::with_backend(backend))),
+        }
+    }
+
+    pub fn terminal_manager(&self) -> Arc<Mutex<TerminalManager<B>>> {
+        self.terminal_manager.clone()
+    }
+
+    fn resolve_terminal_launch(
+        &self,
+        request: &TerminalOpen,
+    ) -> Result<TerminalLaunchTarget, TerminalRuntimeError> {
+        let app = self.app();
+        let session = app
+            .session(&app_session_ref(&request.session))
+            .map_err(|err| TerminalRuntimeError::backend(format!("{err:#}")))?
+            .ok_or_else(|| TerminalRuntimeError::backend("session not found"))?;
+        if let SessionOrigin::Remote(name) = &session.origin {
+            let remote = self
+                .options
+                .settings
+                .remotes
+                .iter()
+                .find(|remote| remote.enabled && &remote.name == name)
+                .ok_or_else(|| {
+                    TerminalRuntimeError::backend(format!(
+                        "remote {name} is not configured for terminal access"
+                    ))
+                })?;
+            let terminal_token = remote
+                .terminal_token
+                .as_deref()
+                .filter(|token| !token.trim().is_empty())
+                .ok_or_else(|| {
+                    TerminalRuntimeError::backend(format!(
+                        "remote {name} terminal token is not configured"
+                    ))
+                })?;
+            let mut remote_open = request.clone();
+            remote_open.session.origin = "local".to_string();
+            return Ok(TerminalLaunchTarget::remote(
+                remote.base_url.clone(),
+                remote.token.clone(),
+                terminal_token.to_string(),
+                remote_open,
+            ));
+        }
+        let target = app
+            .prepare_terminal_launch(&session, terminal_mode(request.mode))
+            .map_err(|err| TerminalRuntimeError::backend(format!("{err:#}")))?;
+        Ok(TerminalLaunchTarget::local(
+            target.program,
+            target.args,
+            target.cwd,
+        ))
+    }
+
+    fn app(&self) -> AppService {
+        AppService::new(AppOptions {
+            settings: self.options.settings.clone(),
+            settings_path: self.options.settings_path.clone(),
+            codex_home: self.options.codex_home.clone(),
+            claude_home: self.options.claude_home.clone(),
+            provider_filter: self.options.provider_filter,
+            database_path: None,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RpcDaemon<B = DaemonTerminalBackend> {
+    state: DaemonState<B>,
+}
+
+impl RpcDaemon<DaemonTerminalBackend> {
+    pub fn new(options: RpcDaemonOptions) -> Self {
+        Self::with_state(DaemonState::new(options))
+    }
+}
+
+impl<B> RpcDaemon<B>
+where
+    B: TerminalBackend,
+{
+    pub fn with_state(state: DaemonState<B>) -> Self {
+        Self { state }
     }
 
     pub fn handle_request(&mut self, request: JsonRpcRequest) -> JsonRpcResponse {
@@ -56,12 +229,19 @@ impl RpcDaemon {
 
     fn dispatch(&mut self, request: JsonRpcRequest) -> Result<Value, RpcDispatchError> {
         match request.method.as_str() {
-            methods::CORE_PING => serde_json::to_value(CorePingResult::default()),
+            methods::DAEMON_PING => serde_json::to_value(DaemonPingResult::default()),
             methods::SESSIONS_LIST => serde_json::to_value(
                 self.app()
                     .session_catalog()
                     .map_err(RpcDispatchError::from_anyhow)?,
             ),
+            methods::SESSIONS_SUMMARIES => {
+                let response = self
+                    .app()
+                    .web_sessions()
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(response)
+            }
             methods::SESSIONS_GET => {
                 let params: SessionGetParams = parse_params(request.params)?;
                 let session = self
@@ -69,7 +249,25 @@ impl RpcDaemon {
                     .ok_or_else(|| RpcDispatchError::not_found("session not found"))?;
                 serde_json::to_value(session)
             }
-            methods::SETTINGS_GET => serde_json::to_value(&self.options.settings),
+            methods::SESSIONS_DETAIL => {
+                let params: SessionGetParams = parse_params(request.params)?;
+                let detail = self
+                    .app()
+                    .web_session_detail(&app_session_ref(&params.session))
+                    .map_err(RpcDispatchError::from_anyhow)?
+                    .ok_or_else(|| RpcDispatchError::not_found("session not found"))?;
+                serde_json::to_value(detail)
+            }
+            methods::SETTINGS_GET => serde_json::to_value(&self.state.options.settings),
+            methods::SETTINGS_SUMMARY => {
+                let params: SettingsSummaryParams = parse_params(request.params)?;
+                let summary = self
+                    .app()
+                    .config_summary(&params.gateway_bind)
+                    .map_err(RpcDispatchError::from_anyhow)?
+                    .with_terminal_runtime(true, params.terminal_socket_available);
+                serde_json::to_value(summary)
+            }
             methods::SETTINGS_UPDATE => {
                 let params: SettingsUpdateParams = parse_params(request.params)?;
                 let mut settings: Settings = serde_json::from_value(params.settings)
@@ -78,12 +276,21 @@ impl RpcDaemon {
                 settings
                     .validate()
                     .map_err(|err| RpcDispatchError::invalid_params(format!("{err:#}")))?;
-                if let Some(path) = &self.options.settings_path {
+                if let Some(path) = &self.state.options.settings_path {
                     save_settings(path, &settings)
                         .map_err(|err| RpcDispatchError::internal(format!("{err:#}")))?;
                 }
-                self.options.settings = settings;
-                serde_json::to_value(&self.options.settings)
+                self.state.options.settings = settings;
+                serde_json::to_value(&self.state.options.settings)
+            }
+            methods::SETTINGS_AI_UPDATE => {
+                let params: AiSettingsUpdateParams = parse_params(request.params)?;
+                let mut app = self.app();
+                let summary = app
+                    .update_ai_settings(ai_settings_update(params))
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                self.state.options.settings = app.settings();
+                serde_json::to_value(summary)
             }
             methods::SHARE_URL => {
                 let params: ShareUrlParams = parse_params(request.params)?;
@@ -135,20 +342,31 @@ impl RpcDaemon {
                     cwd: target.cwd.map(|cwd| cwd.to_string_lossy().to_string()),
                 })
             }
+            methods::TERMINAL_LIST => serde_json::to_value(
+                self.state
+                    .terminal_manager
+                    .lock()
+                    .expect("terminal manager mutex poisoned")
+                    .list(),
+            ),
+            methods::TERMINAL_GET => {
+                let params: TerminalGetParams = parse_params(request.params)?;
+                let terminal = self
+                    .state
+                    .terminal_manager
+                    .lock()
+                    .expect("terminal manager mutex poisoned")
+                    .get(&params.terminal_id)
+                    .ok_or_else(|| RpcDispatchError::not_found("terminal not found"))?;
+                serde_json::to_value(terminal)
+            }
             _ => return Err(RpcDispatchError::method_not_found()),
         }
         .map_err(|err| RpcDispatchError::internal(err.to_string()))
     }
 
     fn app(&self) -> AppService {
-        AppService::new(AppOptions {
-            settings: self.options.settings.clone(),
-            settings_path: self.options.settings_path.clone(),
-            codex_home: self.options.codex_home.clone(),
-            claude_home: self.options.claude_home.clone(),
-            provider_filter: self.options.provider_filter,
-            database_path: None,
-        })
+        self.state.app()
     }
 
     fn sessions(&self) -> Result<Vec<Session>, RpcDispatchError> {
@@ -172,17 +390,22 @@ impl RpcDaemon {
 }
 
 #[derive(Clone, Debug)]
-pub struct LocalRpcClient {
-    daemon: RpcDaemon,
+pub struct LocalRpcClient<B = DaemonTerminalBackend> {
+    daemon: RpcDaemon<B>,
     next_id: i64,
 }
 
-impl LocalRpcClient {
+impl LocalRpcClient<DaemonTerminalBackend> {
     pub fn new(options: RpcDaemonOptions) -> Self {
         Self::from_daemon(RpcDaemon::new(options))
     }
+}
 
-    pub fn from_daemon(daemon: RpcDaemon) -> Self {
+impl<B> LocalRpcClient<B>
+where
+    B: TerminalBackend,
+{
+    pub fn from_daemon(daemon: RpcDaemon<B>) -> Self {
         Self { daemon, next_id: 1 }
     }
 
@@ -190,8 +413,26 @@ impl LocalRpcClient {
         self.call(methods::SESSIONS_LIST, None)
     }
 
+    pub fn session_summaries(&mut self) -> Result<coca_app::SessionsResponse> {
+        self.call(methods::SESSIONS_SUMMARIES, None)
+    }
+
+    pub fn session_detail(&mut self, session: SessionRef) -> Result<coca_app::SessionDetail> {
+        self.call(
+            methods::SESSIONS_DETAIL,
+            to_params(SessionGetParams { session })?,
+        )
+    }
+
     pub fn settings(&mut self) -> Result<Settings> {
         self.call(methods::SETTINGS_GET, None)
+    }
+
+    pub fn settings_summary(
+        &mut self,
+        params: SettingsSummaryParams,
+    ) -> Result<coca_app::ConfigSummary> {
+        self.call(methods::SETTINGS_SUMMARY, to_params(params)?)
     }
 
     pub fn settings_update(&mut self, settings: Settings) -> Result<Settings> {
@@ -200,6 +441,13 @@ impl LocalRpcClient {
             methods::SETTINGS_UPDATE,
             to_params(SettingsUpdateParams { settings })?,
         )
+    }
+
+    pub fn update_ai_settings(
+        &mut self,
+        params: AiSettingsUpdateParams,
+    ) -> Result<coca_app::AiSummary> {
+        self.call(methods::SETTINGS_AI_UPDATE, to_params(params)?)
     }
 
     pub fn share_url(&mut self, session: SessionRef) -> Result<String> {
@@ -218,6 +466,17 @@ impl LocalRpcClient {
 
     pub fn launch_prepare(&mut self, params: LaunchPrepareParams) -> Result<PreparedLaunch> {
         self.call(methods::LAUNCH_PREPARE, to_params(params)?)
+    }
+
+    pub fn terminal_list(&mut self) -> Result<TerminalListResult> {
+        self.call(methods::TERMINAL_LIST, None)
+    }
+
+    pub fn terminal_get(&mut self, terminal_id: TerminalId) -> Result<TerminalSessionSummary> {
+        self.call(
+            methods::TERMINAL_GET,
+            to_params(TerminalGetParams { terminal_id })?,
+        )
     }
 
     fn call<T>(&mut self, method: &str, params: Option<Value>) -> Result<T>
@@ -342,10 +601,29 @@ fn app_session_ref(reference: &SessionRef) -> coca_app::SessionRef {
     }
 }
 
+fn ai_settings_update(params: AiSettingsUpdateParams) -> AiSettingsUpdate {
+    AiSettingsUpdate {
+        base_url: params.base_url,
+        model: params.model,
+        enabled: params.enabled,
+        provider: params.provider,
+        api_key_env: params.api_key_env,
+        api_key: params.api_key,
+        clear_api_key: params.clear_api_key,
+    }
+}
+
 fn launch_mode(mode: LaunchModeWire) -> LaunchMode {
     match mode {
         LaunchModeWire::Resume => LaunchMode::Resume,
         LaunchModeWire::Fork => LaunchMode::Fork,
+    }
+}
+
+fn terminal_mode(mode: TerminalModeWire) -> LaunchMode {
+    match mode {
+        TerminalModeWire::Resume => LaunchMode::Resume,
+        TerminalModeWire::Fork => LaunchMode::Fork,
     }
 }
 
@@ -382,15 +660,19 @@ fn launch_option(option: LaunchOptionWire) -> LaunchOption {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::FakeTerminalBackend;
     use coca_core::settings::ConfiguredRemote;
-    use coca_protocol::{methods, PROTOCOL_VERSION};
+    use coca_protocol::{
+        methods, AiSettingsUpdateParams, SettingsSummaryParams, TerminalModeWire, TerminalOpen,
+        TerminalSize, TerminalStateWire, PROTOCOL_VERSION,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn ping_returns_protocol_version() {
         let mut daemon = RpcDaemon::new(test_options());
 
-        let response = daemon.handle_request(JsonRpcRequest::new(1, methods::CORE_PING, None));
+        let response = daemon.handle_request(JsonRpcRequest::new(1, methods::DAEMON_PING, None));
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
@@ -404,6 +686,7 @@ mod tests {
             name: "bad".to_string(),
             base_url: "https://127.0.0.1:8787".to_string(),
             token: "secret".to_string(),
+            terminal_token: None,
             enabled: true,
         });
         let mut daemon = RpcDaemon::new(options);
@@ -427,6 +710,51 @@ mod tests {
     }
 
     #[test]
+    fn typed_client_returns_session_summaries_from_daemon_app_layer() {
+        let mut client = LocalRpcClient::new(test_options());
+
+        let response = client.session_summaries().unwrap();
+
+        assert_eq!(response.sessions.len(), 0);
+        assert_eq!(response.counts.total, 0);
+        assert!(response.warnings.is_empty());
+    }
+
+    #[test]
+    fn session_detail_returns_not_found_rpc_error() {
+        let mut client = LocalRpcClient::new(test_options());
+
+        let error = client
+            .session_detail(missing_session_ref())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("RPC error 404: session not found"));
+    }
+
+    #[test]
+    fn settings_summary_marks_daemon_runtime_available() {
+        let mut options = test_options();
+        options.settings.terminal.enabled = true;
+        options.settings.terminal.token = "terminal-secret".to_string();
+        let mut client = LocalRpcClient::new(options);
+
+        let summary = client
+            .settings_summary(SettingsSummaryParams {
+                gateway_bind: "127.0.0.1:8787".to_string(),
+                terminal_socket_available: true,
+            })
+            .unwrap();
+
+        assert_eq!(summary.bind, "127.0.0.1:8787");
+        assert!(summary.terminal.daemon_available);
+        assert!(summary.terminal.terminal_socket_available);
+        assert!(summary.terminal.token_configured);
+        let body = serde_json::to_string(&summary).unwrap();
+        assert!(!body.contains("terminal-secret"));
+    }
+
+    #[test]
     fn typed_client_updates_settings_through_json_rpc() {
         let mut client = LocalRpcClient::new(test_options());
         let mut settings = Settings::default();
@@ -438,6 +766,28 @@ mod tests {
         let updated = client.settings_update(settings.clone()).unwrap();
 
         assert_eq!(updated, settings);
+    }
+
+    #[test]
+    fn typed_client_updates_ai_settings_through_daemon_state() {
+        let mut client = LocalRpcClient::new(test_options());
+
+        let summary = client
+            .update_ai_settings(AiSettingsUpdateParams {
+                base_url: Some(" https://example.test/v1 ".to_string()),
+                model: Some(" custom-model ".to_string()),
+                api_key: Some("sk-secret".to_string()),
+                ..AiSettingsUpdateParams::default()
+            })
+            .unwrap();
+        let settings = client.settings().unwrap();
+
+        assert_eq!(summary.base_url, "https://example.test/v1");
+        assert_eq!(summary.model, "custom-model");
+        assert!(summary.api_key_configured);
+        assert_eq!(settings.ai.base_url, "https://example.test/v1");
+        assert_eq!(settings.ai.model, "custom-model");
+        assert_eq!(settings.ai.api_key, "sk-secret");
     }
 
     #[test]
@@ -469,6 +819,41 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(prepare_error.contains("RPC error 404: session not found"));
+    }
+
+    #[test]
+    fn terminal_status_methods_read_shared_daemon_state() {
+        let state = DaemonState::with_backend(test_options(), FakeTerminalBackend::default());
+        let terminal_id = {
+            let manager = state.terminal_manager();
+            let attachment = manager
+                .lock()
+                .unwrap()
+                .open(
+                    "client-a",
+                    TerminalOpen {
+                        session: missing_session_ref(),
+                        mode: TerminalModeWire::Resume,
+                        size: TerminalSize { cols: 80, rows: 24 },
+                    },
+                    TerminalLaunchTarget::local(
+                        "codex".to_string(),
+                        vec!["resume".to_string(), "missing".to_string()],
+                        None,
+                    ),
+                )
+                .unwrap()
+                .terminal;
+            attachment.terminal_id
+        };
+        let mut client = LocalRpcClient::from_daemon(RpcDaemon::with_state(state));
+
+        let list = client.terminal_list().unwrap();
+        let terminal = client.terminal_get(terminal_id).unwrap();
+
+        assert_eq!(list.terminals.len(), 1);
+        assert_eq!(terminal.state, TerminalStateWire::Running);
+        assert_eq!(terminal.attached_clients, 1);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 target/
 dist/
 node_modules/
+.ai/run/
 
 .DS_Store
 *.profraw

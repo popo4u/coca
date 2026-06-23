@@ -148,7 +148,7 @@ impl App {
             }
             KeyCode::Enter => {
                 let session = self.selected_session()?.clone();
-                match self.core_client.prepare_launch(
+                match self.daemon_client.prepare_launch(
                     &session,
                     LaunchMode::Resume,
                     &self.current_cwd,
@@ -195,7 +195,7 @@ impl App {
             KeyCode::Enter => {
                 let dialog = self.launch_dialog.take()?;
                 let session = self.session_by_key(&dialog.session)?.clone();
-                match self.core_client.prepare_launch(
+                match self.daemon_client.prepare_launch(
                     &session,
                     dialog.mode,
                     &self.current_cwd,
@@ -288,7 +288,7 @@ impl App {
             return;
         };
         let options = match self
-            .core_client
+            .daemon_client
             .launch_options(&session, mode, &self.current_cwd)
         {
             Ok(options) => options,
@@ -309,7 +309,7 @@ impl App {
         let Some(session) = self.selected_session().cloned() else {
             return;
         };
-        let url = match self.core_client.share_url(&session) {
+        let url = match self.daemon_client.share_url(&session) {
             Ok(url) => url,
             Err(err) => {
                 self.status_message = Some(err.to_string());
@@ -354,7 +354,7 @@ impl App {
                 let enabled = !self.settings.launch_default(mode, kind);
                 self.settings.set_launch_default(mode, kind, enabled);
             }
-            ConfigItem::CoreBind | ConfigItem::ShareBaseUrl | ConfigItem::ShareToken => {
+            ConfigItem::GatewayBind | ConfigItem::ShareBaseUrl | ConfigItem::ShareToken => {
                 self.open_config_edit(item);
                 return;
             }
@@ -366,7 +366,7 @@ impl App {
 
     fn open_config_edit(&mut self, item: ConfigItem) {
         let input = match &item {
-            ConfigItem::CoreBind => self.settings.core.bind.clone(),
+            ConfigItem::GatewayBind => self.settings.gateway.bind.clone(),
             ConfigItem::ShareBaseUrl => self.settings.share.base_url.clone(),
             ConfigItem::ShareToken => self.settings.share.token.clone(),
             ConfigItem::OriginLocal
@@ -381,13 +381,13 @@ impl App {
             return;
         };
 
-        let restart_core = matches!(
+        let restart_gateway = matches!(
             &edit.item,
-            ConfigItem::CoreBind | ConfigItem::ShareBaseUrl | ConfigItem::ShareToken
+            ConfigItem::GatewayBind | ConfigItem::ShareBaseUrl | ConfigItem::ShareToken
         );
         match edit.item {
-            ConfigItem::CoreBind => {
-                self.settings.core.bind = edit.input.trim().to_string();
+            ConfigItem::GatewayBind => {
+                self.settings.gateway.bind = edit.input.trim().to_string();
             }
             ConfigItem::ShareBaseUrl => {
                 self.settings.share.base_url = edit.input.trim().to_string();
@@ -401,8 +401,9 @@ impl App {
         }
 
         self.settings.ensure_defaults();
-        let success_message = restart_core
-            .then(|| "Settings saved. Restart coca web for changes to take effect.".to_string());
+        let success_message = restart_gateway.then(|| {
+            "Settings saved. Restart coca gateway for changes to take effect.".to_string()
+        });
         self.save_settings_from_tui(success_message);
     }
 
@@ -416,7 +417,7 @@ impl App {
     }
 
     fn save_settings_from_tui(&mut self, success_message: Option<String>) {
-        match self.core_client.update_settings(&self.settings) {
+        match self.daemon_client.update_settings(&self.settings) {
             Ok(update) => {
                 self.settings = update.settings;
                 let message = success_message.unwrap_or(update.status_message);

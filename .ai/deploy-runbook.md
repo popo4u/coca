@@ -12,9 +12,10 @@ is still correct.
 ## Goal
 
 - Build the latest `coca` binary from the current workspace.
-- Update the local `coca` executable and restart the local `coca core`.
+- Update the local `coca` executable and restart the local `coca daemon` and
+  `coca gateway` processes that are actually managed on this host.
 - Update only the remote environments explicitly requested or confirmed by the
-  user, then restart their `coca core`.
+  user, then restart their `coca daemon` and `coca gateway` processes.
 - Verify that local sessions, remote sessions, and the local browser share page
   are usable after deployment.
 
@@ -68,8 +69,10 @@ Local checks:
 - Current installed binary path, usually discovered with `command -v coca`.
 - Current installed binary version with `coca --version`, if available.
 - Runtime settings from `~/.config/coca/settings.json`, with tokens redacted.
-- Local core bind address from settings, not from memory.
-- Current `coca core` PID and listening port.
+- Local `daemon.socket`, `daemon.terminal_socket`, and `gateway.bind` settings,
+  not values remembered from prior deployments.
+- Current `coca daemon` PID and socket paths.
+- Current `coca gateway` PID and listening address.
 - Service manager, for example `launchctl`, `systemd`, or a manually started
   process.
 
@@ -78,8 +81,10 @@ Remote checks, only after the user has selected the remote targets:
 - SSH reachability.
 - Remote OS and CPU architecture.
 - Remote installed binary path and version.
-- Remote `coca core` PID.
-- Remote listening port.
+- Remote `daemon.socket`, `daemon.terminal_socket`, and `gateway.bind`
+  settings, with tokens redacted.
+- Remote `coca daemon` PID and socket paths.
+- Remote `coca gateway` PID and listening address.
 - Remote service manager, if any.
 - Remote log paths, if discoverable.
 
@@ -113,10 +118,13 @@ system. Do not install a binary if the platform or architecture does not match.
 ## Local Deploy Phase
 
 1. Install the release binary to the discovered local install path.
-2. Restart local `coca core` using the discovered service manager.
-3. If local core was manually started, stop only the exact `coca core` process
-   and restart it with equivalent bind/settings behavior.
-4. Verify the new PID and listening port.
+2. Restart local `coca daemon` using the discovered service manager.
+3. Restart local `coca gateway` using the discovered service manager when a
+   gateway is configured or currently running.
+4. If either process was manually started, stop only the exact matching process
+   and restart it with equivalent socket/bind/settings behavior.
+5. Verify the new daemon PID, gateway PID, daemon sockets, and gateway listening
+   address.
 
 Common macOS LaunchAgent flow, when discovered:
 
@@ -126,7 +134,7 @@ launchctl kickstart -k gui/$UID/<launch-label>
 ```
 
 This is an example, not a default. Use it only when the current environment
-actually uses a LaunchAgent for `coca core`.
+actually uses LaunchAgents for `coca daemon` and/or `coca gateway`.
 
 ## Remote Deploy Phase
 
@@ -137,17 +145,20 @@ For each selected remote:
 
 1. Upload the matching artifact to a temporary path.
 2. Install it to the discovered remote install path with mode `0755`.
-3. Stop only the exact old `coca core` process. Do not kill broad matches that
-   could include SSH shells or unrelated commands.
-4. Restart `coca core` with the discovered service manager.
-5. If no service manager exists, start it in the background and redirect logs to
-   a stable location under `~/.local/state/coca/` when possible.
-6. Verify the remote PID and listening port over SSH.
+3. Stop only exact old `coca daemon` and `coca gateway` processes that belong to
+   the selected remote target. Do not kill broad matches that could include SSH
+   shells or unrelated commands.
+4. Restart `coca daemon` and `coca gateway` with the discovered service manager.
+5. If no service manager exists, start them in the background and redirect logs
+   to stable locations under `~/.local/state/coca/` when possible.
+6. Verify the remote daemon PID, gateway PID, daemon sockets, and gateway
+   listening address over SSH.
 
 Exact process matching should prefer patterns equivalent to:
 
 ```sh
-pgrep -af '^/usr/local/bin/coca core$'
+pgrep -af '^/usr/local/bin/coca daemon( |$)'
+pgrep -af '^/usr/local/bin/coca gateway( |$)'
 ```
 
 Adjust the path if the discovered remote binary path is different.
@@ -157,9 +168,11 @@ Adjust the path if the discovered remote binary path is different.
 Local verification:
 
 - `coca --version` runs from the installed path.
-- `coca core` has one expected PID.
-- The configured local bind port is listening.
-- `GET <share.base_url>/api/sessions` returns HTTP 200 with the configured
+- `coca daemon` has one expected PID and its configured sockets are available.
+- `coca gateway` has one expected PID when configured or expected for browser
+  access.
+- The configured `gateway.bind` address is listening when gateway is expected.
+- `GET <share.base_url>/api/v1/sessions` returns HTTP 200 with the configured
   share token.
 - If local sessions exist, one generated `/s/<provider>/<session-id>` share page
   returns HTTP 200. Print only a redacted URL.
@@ -167,17 +180,20 @@ Local verification:
 Remote verification, for each selected remote:
 
 - SSH `coca --version` runs from the installed remote path.
-- Remote `coca core` has one expected PID.
-- The remote bind port is listening.
-- From the local machine, `GET <remote.base_url>/api/sessions` returns HTTP 200
-  with that remote's configured token.
+- Remote `coca daemon` has one expected PID and its configured sockets are
+  available.
+- Remote `coca gateway` has one expected PID when configured or expected for
+  browser/terminal access.
+- The remote `gateway.bind` address is listening when gateway is expected.
+- From the local machine, `GET <remote.base_url>/api/v1/sessions` returns HTTP
+  200 with that remote's configured token.
 
 Final summary must include:
 
-- Local install path, PID, listening address or port, API HTTP status, session
-  count, and share page HTTP status.
-- Each remote name, host, install path, PID, listening address or port, API HTTP
-  status, and session count.
+- Local install path, daemon PID, gateway PID, daemon socket paths, gateway
+  listening address, API HTTP status, session count, and share page HTTP status.
+- Each remote name, host, install path, daemon PID, gateway PID, gateway
+  listening address, API HTTP status, and session count.
 - Any failed phase with the failing command and concise stderr summary.
 - No tokens.
 
@@ -190,9 +206,9 @@ Final summary must include:
 - If install succeeds but restart fails, report the service status and log
   paths.
 - If API verification fails, report the redacted URL, HTTP status, and relevant
-  core log summary.
-- If multiple `coca core` processes are found, handle only exact matches. Ask
-  the user before killing ambiguous processes.
+  daemon/gateway log summary.
+- If multiple `coca daemon` or `coca gateway` processes are found, handle only
+  exact matches. Ask the user before killing ambiguous processes.
 
 ## Prompt Template
 
@@ -209,11 +225,11 @@ Requirements:
    tokens.
 4. Build the latest local binary and any selected remote binary for the matching
    target architecture.
-5. Replace the local binary, restart local coca core, and verify local API and
-   share page.
+5. Replace the local binary, restart local coca daemon and coca gateway, and
+   verify local API and share page.
 6. For selected remotes only, upload the matching artifact, replace the remote
-   binary, restart remote coca core, and verify remote API.
+   binary, restart remote coca daemon and coca gateway, and verify remote API.
 7. Prefer subagents for remote deploy work when available.
-8. Final output should summarize PID, listening port, HTTP status, session
-   count, and failures only. Do not include tokens.
+8. Final output should summarize daemon PID, gateway PID, listening address,
+   HTTP status, session count, and failures only. Do not include tokens.
 ```
