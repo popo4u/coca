@@ -4,17 +4,25 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use coca_app::{AiSettingsUpdate, AppOptions, AppService};
+use coca_app::{
+    AccessTokenCreateInput, AccessTokenCreateResponse, AccessTokensResponse, AccountMe,
+    AccountPasswordUpdateInput, AccountProfileUpdateInput, AiSettingsUpdate, AppOptions,
+    AppService, AuthCapabilities, AuthLoginInput, AuthSessionResponse, AuthSignupInput,
+    AuthValidation, DeviceSessionsResponse, RevokeResponse,
+};
 use coca_core::catalog::SessionCatalog;
 use coca_core::launch::{LaunchMode, LaunchOption, LaunchOptionKind};
 use coca_core::model::{ProviderFilter, ProviderKind, Session, SessionOrigin};
 use coca_core::settings::{save_settings, Settings};
 use coca_protocol::{
-    methods, AiSettingsUpdateParams, DaemonPingResult, JsonRpcRequest, JsonRpcResponse,
-    LaunchModeWire, LaunchOptionKindWire, LaunchOptionWire, LaunchOptionsParams,
-    LaunchPrepareParams, PreparedLaunch, RpcId, SessionGetParams, SessionRef,
-    SettingsSummaryParams, SettingsUpdateParams, ShareUrlParams, TerminalGetParams, TerminalId,
-    TerminalListResult, TerminalModeWire, TerminalOpen, TerminalSessionSummary,
+    methods, AccountDevicesRevokeParams, AccountPasswordUpdateParams, AccountProfileUpdateParams,
+    AccountSubjectParams, AccountTokensCreateParams, AccountTokensRevokeParams,
+    AiSettingsUpdateParams, AuthLoginParams, AuthLogoutParams, AuthSignupParams,
+    AuthValidateParams, DaemonPingResult, JsonRpcRequest, JsonRpcResponse, LaunchModeWire,
+    LaunchOptionKindWire, LaunchOptionWire, LaunchOptionsParams, LaunchPrepareParams,
+    PreparedLaunch, RpcId, SessionGetParams, SessionRef, SettingsSummaryParams,
+    SettingsUpdateParams, ShareUrlParams, TerminalGetParams, TerminalId, TerminalListResult,
+    TerminalModeWire, TerminalOpen, TerminalSessionSummary,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
@@ -101,6 +109,7 @@ pub struct RpcDaemonOptions {
     pub codex_home: Option<PathBuf>,
     pub claude_home: Option<PathBuf>,
     pub provider_filter: ProviderFilter,
+    pub database_path: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -195,7 +204,7 @@ where
             codex_home: self.options.codex_home.clone(),
             claude_home: self.options.claude_home.clone(),
             provider_filter: self.options.provider_filter,
-            database_path: None,
+            database_path: self.options.database_path.clone(),
         })
     }
 }
@@ -342,6 +351,133 @@ where
                     cwd: target.cwd.map(|cwd| cwd.to_string_lossy().to_string()),
                 })
             }
+            methods::AUTH_CAPABILITIES => {
+                let value = self
+                    .app()
+                    .auth_capabilities()
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(value)
+            }
+            methods::AUTH_SIGNUP => {
+                let params: AuthSignupParams = parse_params(request.params)?;
+                let value = self
+                    .app()
+                    .auth_signup(AuthSignupInput {
+                        email: params.email,
+                        password: params.password,
+                        display_name: params.display_name,
+                        device_label: params.device_label,
+                        bootstrap_token: params.bootstrap_token,
+                    })
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(value)
+            }
+            methods::AUTH_LOGIN => {
+                let params: AuthLoginParams = parse_params(request.params)?;
+                let value = self
+                    .app()
+                    .auth_login(AuthLoginInput {
+                        email: params.email,
+                        password: params.password,
+                        device_label: params.device_label,
+                    })
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(value)
+            }
+            methods::AUTH_VALIDATE => {
+                let params: AuthValidateParams = parse_params(request.params)?;
+                let value = self
+                    .app()
+                    .auth_validate(&params.token)
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(value)
+            }
+            methods::AUTH_LOGOUT => {
+                let params: AuthLogoutParams = parse_params(request.params)?;
+                let value = self
+                    .app()
+                    .auth_logout(&params.token)
+                    .map(|revoked| RevokeResponse { revoked })
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(value)
+            }
+            methods::ACCOUNT_ME => {
+                let params: AccountSubjectParams = parse_params(request.params)?;
+                let value = self
+                    .app()
+                    .account_me(&params.user_id)
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(value)
+            }
+            methods::ACCOUNT_PROFILE_UPDATE => {
+                let params: AccountProfileUpdateParams = parse_params(request.params)?;
+                let value = self
+                    .app()
+                    .update_account_profile(
+                        &params.user_id,
+                        AccountProfileUpdateInput {
+                            display_name: params.display_name,
+                        },
+                    )
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(value)
+            }
+            methods::ACCOUNT_PASSWORD_UPDATE => {
+                let params: AccountPasswordUpdateParams = parse_params(request.params)?;
+                self.app()
+                    .update_account_password(
+                        &params.user_id,
+                        AccountPasswordUpdateInput {
+                            current_password: params.current_password,
+                            new_password: params.new_password,
+                        },
+                    )
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                Ok(json!({ "ok": true }))
+            }
+            methods::ACCOUNT_DEVICES_LIST => {
+                let params: AccountSubjectParams = parse_params(request.params)?;
+                let value = self
+                    .app()
+                    .account_devices(&params.user_id)
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(value)
+            }
+            methods::ACCOUNT_DEVICES_REVOKE => {
+                let params: AccountDevicesRevokeParams = parse_params(request.params)?;
+                let value = self
+                    .app()
+                    .revoke_account_device(&params.user_id, &params.session_id)
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(value)
+            }
+            methods::ACCOUNT_TOKENS_LIST => {
+                let params: AccountSubjectParams = parse_params(request.params)?;
+                let value = self
+                    .app()
+                    .account_tokens(&params.user_id)
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(value)
+            }
+            methods::ACCOUNT_TOKENS_CREATE => {
+                let params: AccountTokensCreateParams = parse_params(request.params)?;
+                let value = self
+                    .app()
+                    .create_account_token(
+                        &params.user_id,
+                        AccessTokenCreateInput { name: params.name },
+                    )
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(value)
+            }
+            methods::ACCOUNT_TOKENS_REVOKE => {
+                let params: AccountTokensRevokeParams = parse_params(request.params)?;
+                let value = self
+                    .app()
+                    .revoke_account_token(&params.user_id, &params.token_id)
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(value)
+            }
             methods::TERMINAL_LIST => serde_json::to_value(
                 self.state
                     .terminal_manager
@@ -477,6 +613,85 @@ where
             methods::TERMINAL_GET,
             to_params(TerminalGetParams { terminal_id })?,
         )
+    }
+
+    pub fn auth_capabilities(&mut self) -> Result<AuthCapabilities> {
+        self.call(methods::AUTH_CAPABILITIES, None)
+    }
+
+    pub fn auth_signup(&mut self, params: AuthSignupParams) -> Result<AuthSessionResponse> {
+        self.call(methods::AUTH_SIGNUP, to_params(params)?)
+    }
+
+    pub fn auth_login(&mut self, params: AuthLoginParams) -> Result<AuthSessionResponse> {
+        self.call(methods::AUTH_LOGIN, to_params(params)?)
+    }
+
+    pub fn auth_validate(&mut self, token: String) -> Result<Option<AuthValidation>> {
+        self.call(
+            methods::AUTH_VALIDATE,
+            to_params(AuthValidateParams { token })?,
+        )
+    }
+
+    pub fn auth_logout(&mut self, token: String) -> Result<RevokeResponse> {
+        self.call(methods::AUTH_LOGOUT, to_params(AuthLogoutParams { token })?)
+    }
+
+    pub fn account_me(&mut self, user_id: String) -> Result<AccountMe> {
+        self.call(
+            methods::ACCOUNT_ME,
+            to_params(AccountSubjectParams { user_id })?,
+        )
+    }
+
+    pub fn account_profile_update(
+        &mut self,
+        params: AccountProfileUpdateParams,
+    ) -> Result<AccountMe> {
+        self.call(methods::ACCOUNT_PROFILE_UPDATE, to_params(params)?)
+    }
+
+    pub fn account_password_update(
+        &mut self,
+        params: AccountPasswordUpdateParams,
+    ) -> Result<Value> {
+        self.call(methods::ACCOUNT_PASSWORD_UPDATE, to_params(params)?)
+    }
+
+    pub fn account_devices(&mut self, user_id: String) -> Result<DeviceSessionsResponse> {
+        self.call(
+            methods::ACCOUNT_DEVICES_LIST,
+            to_params(AccountSubjectParams { user_id })?,
+        )
+    }
+
+    pub fn account_device_revoke(
+        &mut self,
+        params: AccountDevicesRevokeParams,
+    ) -> Result<RevokeResponse> {
+        self.call(methods::ACCOUNT_DEVICES_REVOKE, to_params(params)?)
+    }
+
+    pub fn account_tokens(&mut self, user_id: String) -> Result<AccessTokensResponse> {
+        self.call(
+            methods::ACCOUNT_TOKENS_LIST,
+            to_params(AccountSubjectParams { user_id })?,
+        )
+    }
+
+    pub fn account_token_create(
+        &mut self,
+        params: AccountTokensCreateParams,
+    ) -> Result<AccessTokenCreateResponse> {
+        self.call(methods::ACCOUNT_TOKENS_CREATE, to_params(params)?)
+    }
+
+    pub fn account_token_revoke(
+        &mut self,
+        params: AccountTokensRevokeParams,
+    ) -> Result<RevokeResponse> {
+        self.call(methods::ACCOUNT_TOKENS_REVOKE, to_params(params)?)
     }
 
     fn call<T>(&mut self, method: &str, params: Option<Value>) -> Result<T>
@@ -857,6 +1072,67 @@ mod tests {
     }
 
     #[test]
+    fn auth_rpc_flow_uses_daemon_database_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = test_options();
+        options.settings.share.token = "share-secret".to_string();
+        options.database_path = Some(dir.path().join("auth.db"));
+        let mut client = LocalRpcClient::new(options);
+
+        let capabilities = client.auth_capabilities().unwrap();
+        assert!(capabilities.signup_enabled);
+        assert!(!capabilities.sso[0].available);
+
+        let signup = client
+            .auth_signup(AuthSignupParams {
+                email: " USER@Example.COM ".to_string(),
+                password: "password".to_string(),
+                display_name: Some(" User ".to_string()),
+                device_label: Some("Browser".to_string()),
+                bootstrap_token: Some("share-secret".to_string()),
+            })
+            .unwrap();
+        let validation = client
+            .auth_validate(signup.session_token.clone())
+            .unwrap()
+            .expect("valid session token");
+        assert_eq!(validation.user.email, "user@example.com");
+        assert_eq!(validation.user.display_name.as_deref(), Some("User"));
+        assert!(!client.auth_capabilities().unwrap().signup_enabled);
+
+        let me = client.account_me(validation.user.id.clone()).unwrap();
+        assert_eq!(me.user.id, validation.user.id);
+
+        let created = client
+            .account_token_create(AccountTokensCreateParams {
+                user_id: validation.user.id.clone(),
+                name: "CI".to_string(),
+            })
+            .unwrap();
+        assert!(created.plaintext_token.starts_with("coca_pat_"));
+        let tokens = client.account_tokens(validation.user.id.clone()).unwrap();
+        assert_eq!(tokens.tokens.len(), 1);
+        assert!(!serde_json::to_string(&tokens)
+            .unwrap()
+            .contains(&created.plaintext_token));
+
+        assert!(
+            client
+                .account_token_revoke(AccountTokensRevokeParams {
+                    user_id: validation.user.id.clone(),
+                    token_id: created.token.id,
+                })
+                .unwrap()
+                .revoked
+        );
+        assert!(client
+            .auth_validate(created.plaintext_token)
+            .unwrap()
+            .is_none());
+        assert!(client.auth_logout(signup.session_token).unwrap().revoked);
+    }
+
+    #[test]
     fn unknown_method_returns_json_rpc_error() {
         let mut daemon = RpcDaemon::new(test_options());
 
@@ -879,6 +1155,7 @@ mod tests {
             codex_home: Some(codex_home),
             claude_home: Some(claude_home),
             provider_filter: ProviderFilter::All,
+            database_path: None,
         }
     }
 

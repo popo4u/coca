@@ -1,8 +1,18 @@
 import type {
+  AccountDevicesResponse,
+  AccountMe,
+  AccountTokenCreateResponse,
+  AccountTokensResponse,
+  AuthCapabilities,
+  AuthLoginRequest,
+  AuthSessionResponse,
+  AuthSignupRequest,
   AiSettingsUpdate,
   AiSummary,
   ConfigSummary,
   HealthResponse,
+  PasswordUpdate,
+  ProfileUpdate,
   SessionDetail,
   SessionRef,
   SessionsResponse,
@@ -77,6 +87,54 @@ export class ApiClient {
     return this.get<HealthResponse>("/api/v1/health");
   }
 
+  authCapabilities() {
+    return this.get<AuthCapabilities>("/api/v1/auth/capabilities");
+  }
+
+  login(request: AuthLoginRequest) {
+    return this.post<AuthSessionResponse>("/api/v1/auth/login", request);
+  }
+
+  signup(request: AuthSignupRequest) {
+    return this.post<AuthSessionResponse>("/api/v1/auth/signup", request);
+  }
+
+  logout() {
+    return this.post<Record<string, never>>("/api/v1/auth/logout", {});
+  }
+
+  accountMe() {
+    return this.get<AccountMe>("/api/v1/account/me");
+  }
+
+  updateProfile(update: ProfileUpdate) {
+    return this.patch<AccountMe["user"]>("/api/v1/account/profile", update);
+  }
+
+  updatePassword(update: PasswordUpdate) {
+    return this.post<Record<string, never>>("/api/v1/account/password", update);
+  }
+
+  accountDevices() {
+    return this.get<AccountDevicesResponse>("/api/v1/account/devices");
+  }
+
+  revokeDevice(deviceId: string) {
+    return this.post<Record<string, never>>("/api/v1/account/devices/revoke", { session_id: deviceId });
+  }
+
+  accountTokens() {
+    return this.get<AccountTokensResponse>("/api/v1/account/tokens");
+  }
+
+  createAccountToken(name: string) {
+    return this.post<AccountTokenCreateResponse>("/api/v1/account/tokens", { name });
+  }
+
+  revokeAccountToken(tokenId: string) {
+    return this.post<Record<string, never>>("/api/v1/account/tokens/revoke", { token_id: tokenId });
+  }
+
   sessions() {
     return this.get<SessionsResponse>("/api/v1/sessions");
   }
@@ -138,10 +196,20 @@ export class ApiClient {
     return decode<T>(response);
   }
 
-  private headers() {
-    return {
-      Authorization: `Bearer ${this.token}`
-    };
+  private async patch<T>(path: string, body: unknown): Promise<T> {
+    const response = await fetch(path, {
+      method: "PATCH",
+      headers: {
+        ...this.headers(),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+    return decode<T>(response);
+  }
+
+  private headers(): Record<string, string> {
+    return this.token ? { Authorization: `Bearer ${this.token}` } : {};
   }
 }
 

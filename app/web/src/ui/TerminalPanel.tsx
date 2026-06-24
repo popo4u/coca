@@ -2,7 +2,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { GitFork, KeyRound, Plug, RefreshCw, RotateCw, Square, TerminalSquare, Trash2, Unplug } from "lucide-react";
+import { GitFork, KeyRound, Maximize2, Minimize2, Plug, RefreshCw, RotateCw, Square, TerminalSquare, Trash2, Unplug } from "lucide-react";
 import {
   ApiClient,
   ApiError,
@@ -46,7 +46,8 @@ export function TerminalPanel({
   terminalToken,
   onTerminalTokenChange,
   session,
-  reference
+  reference,
+  initialAttachId = null
 }: {
   client: ApiClient;
   readToken: string;
@@ -54,6 +55,7 @@ export function TerminalPanel({
   onTerminalTokenChange: (token: string) => void;
   session: SessionSummary;
   reference: SessionRef;
+  initialAttachId?: string | null;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -71,6 +73,8 @@ export function TerminalPanel({
   const [statusMessage, setStatusMessage] = useState("No terminal attached.");
   const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null);
   const [activeSummary, setActiveSummary] = useState<TerminalSessionSummary | null>(null);
+  const [maximized, setMaximized] = useState(false);
+  const initialAttachConsumedRef = useRef<string | null>(null);
 
   const canResume = session.terminal.enabled && session.terminal.can_resume;
   const canFork = session.terminal.enabled && session.terminal.can_fork;
@@ -278,6 +282,13 @@ export function TerminalPanel({
     });
   }
 
+  useEffect(() => {
+    const id = initialAttachId?.trim();
+    if (!id || !terminalToken || initialAttachConsumedRef.current === id) return;
+    initialAttachConsumedRef.current = id;
+    attachTerminal(id);
+  }, [initialAttachId, terminalToken]);
+
   function detachTerminal() {
     const terminalId = activeTerminalIdRef.current;
     const socket = socketRef.current;
@@ -323,7 +334,7 @@ export function TerminalPanel({
   }
 
   return (
-    <section className="terminal-panel" aria-label="Terminal">
+    <section className={`terminal-panel ${maximized ? "maximized" : ""}`} aria-label="Terminal">
       <header className="section-head terminal-head">
         <div>
           <p>terminal</p>
@@ -332,6 +343,9 @@ export function TerminalPanel({
         <div className="terminal-status-strip">
           <span className={`terminal-state ${connectionStatus}`}>{connectionStatus}</span>
           {activeSummary && <span className="terminal-state">{activeSummary.state.toLowerCase()}</span>}
+          <button className="icon-button" type="button" onClick={() => setMaximized((value) => !value)} aria-label={maximized ? "Restore terminal" : "Maximize terminal"}>
+            {maximized ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+          </button>
         </div>
       </header>
 

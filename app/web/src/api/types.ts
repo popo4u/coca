@@ -116,6 +116,108 @@ export type HealthResponse = {
   stream: StreamInfo;
 };
 
+export type AuthCapabilities = {
+  email_password?: {
+    available?: boolean;
+    configured?: boolean;
+    reason?: string | null;
+  };
+  signup_enabled?: boolean;
+  signup_requires_bootstrap_token?: boolean;
+  sso?: Array<{
+    provider: string;
+    available?: boolean;
+    configured?: boolean;
+    reason?: string | null;
+  }>;
+};
+
+export type AccountUser = {
+  id: string;
+  email: string;
+  display_name: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+};
+
+export type AccountDevice = {
+  id?: string;
+  device_id?: string;
+  label?: string | null;
+  name?: string;
+  device_name?: string;
+  user_agent?: string | null;
+  ip?: string | null;
+  created_at_ms?: number | null;
+  last_seen_at_ms?: number | null;
+  revoked_at_ms?: number | null;
+  last_seen_at?: string | null;
+  current?: boolean;
+};
+
+export type AccountToken = {
+  id?: string;
+  token_id?: string;
+  name: string;
+  preview?: string | null;
+  token_preview?: string | null;
+  created_at_ms?: number | null;
+  last_used_at_ms?: number | null;
+  revoked_at_ms?: number | null;
+  last_used_at?: string | null;
+  created_at?: string | null;
+};
+
+export type AccountMe = {
+  user: AccountUser;
+  auth_mode?: "account" | "legacy" | string | null;
+  device?: AccountDevice | null;
+};
+
+export type AuthLoginRequest = {
+  email: string;
+  password: string;
+  device_label?: string;
+};
+
+export type AuthSignupRequest = {
+  email: string;
+  password: string;
+  display_name?: string;
+  bootstrap_token: string;
+  device_label?: string;
+};
+
+export type AuthSessionResponse = {
+  session_token: string;
+  user: AccountUser;
+  session: AccountDevice;
+};
+
+export type ProfileUpdate = {
+  display_name?: string;
+  email?: string;
+};
+
+export type PasswordUpdate = {
+  current_password: string;
+  new_password: string;
+};
+
+export type AccountDevicesResponse = {
+  devices: AccountDevice[];
+};
+
+export type AccountTokensResponse = {
+  tokens: AccountToken[];
+};
+
+export type AccountTokenCreateResponse = {
+  token: AccountToken;
+  plaintext_token: string;
+  access_token?: string;
+};
+
 export type SessionRef = {
   origin: string;
   provider: string;

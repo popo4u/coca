@@ -19,6 +19,19 @@ pub mod methods {
     pub const LAUNCH_PREPARE: &str = "launch.prepare";
     pub const TERMINAL_LIST: &str = "terminal.list";
     pub const TERMINAL_GET: &str = "terminal.get";
+    pub const AUTH_CAPABILITIES: &str = "auth.capabilities";
+    pub const AUTH_LOGIN: &str = "auth.login";
+    pub const AUTH_SIGNUP: &str = "auth.signup";
+    pub const AUTH_VALIDATE: &str = "auth.validate";
+    pub const AUTH_LOGOUT: &str = "auth.logout";
+    pub const ACCOUNT_ME: &str = "account.me";
+    pub const ACCOUNT_PROFILE_UPDATE: &str = "account.profile.update";
+    pub const ACCOUNT_PASSWORD_UPDATE: &str = "account.password.update";
+    pub const ACCOUNT_DEVICES_LIST: &str = "account.devices.list";
+    pub const ACCOUNT_DEVICES_REVOKE: &str = "account.devices.revoke";
+    pub const ACCOUNT_TOKENS_LIST: &str = "account.tokens.list";
+    pub const ACCOUNT_TOKENS_CREATE: &str = "account.tokens.create";
+    pub const ACCOUNT_TOKENS_REVOKE: &str = "account.tokens.revoke";
 }
 
 pub mod terminal_events {
@@ -216,6 +229,68 @@ pub struct AiSettingsUpdateParams {
     pub api_key: Option<String>,
     #[serde(default)]
     pub clear_api_key: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AuthLoginParams {
+    pub email: String,
+    pub password: String,
+    pub device_label: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AuthSignupParams {
+    pub email: String,
+    pub password: String,
+    pub display_name: Option<String>,
+    pub device_label: Option<String>,
+    pub bootstrap_token: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AuthValidateParams {
+    pub token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AuthLogoutParams {
+    pub token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccountSubjectParams {
+    pub user_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccountProfileUpdateParams {
+    pub user_id: String,
+    pub display_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccountPasswordUpdateParams {
+    pub user_id: String,
+    pub current_password: String,
+    pub new_password: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccountDevicesRevokeParams {
+    pub user_id: String,
+    pub session_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccountTokensCreateParams {
+    pub user_id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccountTokensRevokeParams {
+    pub user_id: String,
+    pub token_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -438,5 +513,38 @@ mod tests {
 
         assert_eq!(decoded, frame);
         assert!(json.contains("terminal.open"));
+    }
+
+    #[test]
+    fn auth_method_names_match_gateway_contract() {
+        assert_eq!(methods::AUTH_CAPABILITIES, "auth.capabilities");
+        assert_eq!(methods::AUTH_LOGIN, "auth.login");
+        assert_eq!(methods::AUTH_SIGNUP, "auth.signup");
+        assert_eq!(methods::AUTH_VALIDATE, "auth.validate");
+        assert_eq!(methods::AUTH_LOGOUT, "auth.logout");
+        assert_eq!(methods::ACCOUNT_ME, "account.me");
+        assert_eq!(methods::ACCOUNT_PROFILE_UPDATE, "account.profile.update");
+        assert_eq!(methods::ACCOUNT_PASSWORD_UPDATE, "account.password.update");
+        assert_eq!(methods::ACCOUNT_DEVICES_LIST, "account.devices.list");
+        assert_eq!(methods::ACCOUNT_DEVICES_REVOKE, "account.devices.revoke");
+        assert_eq!(methods::ACCOUNT_TOKENS_LIST, "account.tokens.list");
+        assert_eq!(methods::ACCOUNT_TOKENS_CREATE, "account.tokens.create");
+        assert_eq!(methods::ACCOUNT_TOKENS_REVOKE, "account.tokens.revoke");
+    }
+
+    #[test]
+    fn auth_params_roundtrip() {
+        let params = AuthSignupParams {
+            email: "user@example.com".to_string(),
+            password: "password".to_string(),
+            display_name: Some("User".to_string()),
+            device_label: Some("Browser".to_string()),
+            bootstrap_token: Some("bootstrap".to_string()),
+        };
+
+        let json = serde_json::to_string(&params).unwrap();
+        let decoded: AuthSignupParams = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, params);
     }
 }

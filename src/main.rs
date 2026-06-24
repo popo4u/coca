@@ -35,6 +35,7 @@ fn main() -> Result<()> {
                         codex_home: args.codex_home(),
                         claude_home: args.claude_home(),
                         provider_filter: args.provider_filter(),
+                        database_path: None,
                     },
                 )
             }
@@ -76,6 +77,7 @@ fn run_tui_command(
         codex_home: cli.codex_home(),
         claude_home: cli.claude_home(),
         provider_filter,
+        database_path: None,
     });
 
     if let Some(target) = run_tui(Box::new(daemon_client), provider_filter)? {

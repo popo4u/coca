@@ -7,11 +7,14 @@ use std::thread;
 
 use anyhow::{Context, Result};
 use base64::prelude::{Engine as _, BASE64_STANDARD};
-use coca_app::StreamInfo;
+use coca_app::{AuthValidation, StreamInfo};
 use coca_protocol::{
-    methods, AiSettingsUpdateParams, DaemonPingResult, JsonRpcRequest, RpcError, RpcId,
-    SessionGetParams, SessionRef, SettingsSummaryParams, ShareUrlParams, TerminalClientFrame,
-    TerminalError, TerminalListResult, TerminalServerFrame,
+    methods, AccountDevicesRevokeParams, AccountPasswordUpdateParams, AccountProfileUpdateParams,
+    AccountSubjectParams, AccountTokensCreateParams, AccountTokensRevokeParams,
+    AiSettingsUpdateParams, AuthLoginParams, AuthLogoutParams, AuthSignupParams,
+    AuthValidateParams, DaemonPingResult, JsonRpcRequest, RpcError, RpcId, SessionGetParams,
+    SessionRef, SettingsSummaryParams, ShareUrlParams, TerminalClientFrame, TerminalError,
+    TerminalListResult, TerminalServerFrame,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -129,12 +132,163 @@ fn route_request(request: &Request, options: &GatewayOptions) -> Response {
 }
 
 fn route_api(request: &Request, options: &GatewayOptions) -> Response {
-    if let Some(response) = reject_api_request(request, options) {
-        return response;
-    }
+    let auth = if is_public_auth_route(request) {
+        None
+    } else {
+        match authenticate_api_request(request, options) {
+            Ok(auth) => Some(auth),
+            Err(response) => return response,
+        }
+    };
 
     match (request.method.as_str(), request.path()) {
         ("GET", "/api/v1/health") => json_response(gateway_health(options)),
+        ("GET", "/api/v1/auth/capabilities") => daemon_json_response(daemon_rpc::<Value>(
+            options,
+            methods::AUTH_CAPABILITIES,
+            None,
+        )),
+        ("POST", "/api/v1/auth/login") => {
+            let Ok(body) = serde_json::from_slice::<AuthLoginParams>(&request.body) else {
+                return Response::text(400, "Bad Request", "invalid auth login payload");
+            };
+            daemon_json_response(daemon_rpc::<Value>(
+                options,
+                methods::AUTH_LOGIN,
+                Some(rpc_params(body)),
+            ))
+        }
+        ("POST", "/api/v1/auth/signup") => {
+            let Ok(body) = serde_json::from_slice::<AuthSignupParams>(&request.body) else {
+                return Response::text(400, "Bad Request", "invalid auth signup payload");
+            };
+            daemon_json_response(daemon_rpc::<Value>(
+                options,
+                methods::AUTH_SIGNUP,
+                Some(rpc_params(body)),
+            ))
+        }
+        ("POST", "/api/v1/auth/logout") => {
+            let Some(token) = user_auth_token(&auth) else {
+                return Response::text(401, "Unauthorized", "unauthorized");
+            };
+            daemon_json_response(daemon_rpc::<Value>(
+                options,
+                methods::AUTH_LOGOUT,
+                Some(rpc_params(AuthLogoutParams { token })),
+            ))
+        }
+        ("GET", "/api/v1/account/me") => {
+            let Some(user_id) = user_id(&auth) else {
+                return Response::text(401, "Unauthorized", "unauthorized");
+            };
+            daemon_json_response(daemon_rpc::<Value>(
+                options,
+                methods::ACCOUNT_ME,
+                Some(rpc_params(AccountSubjectParams { user_id })),
+            ))
+        }
+        ("PATCH", "/api/v1/account/profile") => {
+            let Some(user_id) = user_id(&auth) else {
+                return Response::text(401, "Unauthorized", "unauthorized");
+            };
+            let Ok(body) = serde_json::from_slice::<AccountProfileBody>(&request.body) else {
+                return Response::text(400, "Bad Request", "invalid account profile payload");
+            };
+            daemon_json_response(daemon_rpc::<Value>(
+                options,
+                methods::ACCOUNT_PROFILE_UPDATE,
+                Some(rpc_params(AccountProfileUpdateParams {
+                    user_id,
+                    display_name: body.display_name,
+                })),
+            ))
+        }
+        ("POST", "/api/v1/account/password") => {
+            let Some(user_id) = user_id(&auth) else {
+                return Response::text(401, "Unauthorized", "unauthorized");
+            };
+            let Ok(body) = serde_json::from_slice::<AccountPasswordBody>(&request.body) else {
+                return Response::text(400, "Bad Request", "invalid account password payload");
+            };
+            daemon_json_response(daemon_rpc::<Value>(
+                options,
+                methods::ACCOUNT_PASSWORD_UPDATE,
+                Some(rpc_params(AccountPasswordUpdateParams {
+                    user_id,
+                    current_password: body.current_password,
+                    new_password: body.new_password,
+                })),
+            ))
+        }
+        ("GET", "/api/v1/account/devices") => {
+            let Some(user_id) = user_id(&auth) else {
+                return Response::text(401, "Unauthorized", "unauthorized");
+            };
+            daemon_json_response(daemon_rpc::<Value>(
+                options,
+                methods::ACCOUNT_DEVICES_LIST,
+                Some(rpc_params(AccountSubjectParams { user_id })),
+            ))
+        }
+        ("POST", "/api/v1/account/devices/revoke") => {
+            let Some(user_id) = user_id(&auth) else {
+                return Response::text(401, "Unauthorized", "unauthorized");
+            };
+            let Ok(body) = serde_json::from_slice::<DeviceRevokeBody>(&request.body) else {
+                return Response::text(400, "Bad Request", "invalid account device revoke payload");
+            };
+            daemon_json_response(daemon_rpc::<Value>(
+                options,
+                methods::ACCOUNT_DEVICES_REVOKE,
+                Some(rpc_params(AccountDevicesRevokeParams {
+                    user_id,
+                    session_id: body.session_id,
+                })),
+            ))
+        }
+        ("GET", "/api/v1/account/tokens") => {
+            let Some(user_id) = user_id(&auth) else {
+                return Response::text(401, "Unauthorized", "unauthorized");
+            };
+            daemon_json_response(daemon_rpc::<Value>(
+                options,
+                methods::ACCOUNT_TOKENS_LIST,
+                Some(rpc_params(AccountSubjectParams { user_id })),
+            ))
+        }
+        ("POST", "/api/v1/account/tokens") => {
+            let Some(user_id) = user_id(&auth) else {
+                return Response::text(401, "Unauthorized", "unauthorized");
+            };
+            let Ok(body) = serde_json::from_slice::<AccessTokenCreateBody>(&request.body) else {
+                return Response::text(400, "Bad Request", "invalid account token payload");
+            };
+            daemon_json_response(daemon_rpc::<Value>(
+                options,
+                methods::ACCOUNT_TOKENS_CREATE,
+                Some(rpc_params(AccountTokensCreateParams {
+                    user_id,
+                    name: body.name,
+                })),
+            ))
+        }
+        ("POST", "/api/v1/account/tokens/revoke") => {
+            let Some(user_id) = user_id(&auth) else {
+                return Response::text(401, "Unauthorized", "unauthorized");
+            };
+            let Ok(body) = serde_json::from_slice::<AccessTokenRevokeBody>(&request.body) else {
+                return Response::text(400, "Bad Request", "invalid account token revoke payload");
+            };
+            daemon_json_response(daemon_rpc::<Value>(
+                options,
+                methods::ACCOUNT_TOKENS_REVOKE,
+                Some(rpc_params(AccountTokensRevokeParams {
+                    user_id,
+                    token_id: body.token_id,
+                })),
+            ))
+        }
         ("GET", "/api/v1/sessions") => daemon_json_response(daemon_rpc::<Value>(
             options,
             methods::SESSIONS_SUMMARIES,
@@ -194,6 +348,17 @@ fn route_api(request: &Request, options: &GatewayOptions) -> Response {
         }))
         .with_status(501, "Not Implemented"),
         (_, "/api/v1/health")
+        | (_, "/api/v1/auth/capabilities")
+        | (_, "/api/v1/auth/login")
+        | (_, "/api/v1/auth/signup")
+        | (_, "/api/v1/auth/logout")
+        | (_, "/api/v1/account/me")
+        | (_, "/api/v1/account/profile")
+        | (_, "/api/v1/account/password")
+        | (_, "/api/v1/account/devices")
+        | (_, "/api/v1/account/devices/revoke")
+        | (_, "/api/v1/account/tokens")
+        | (_, "/api/v1/account/tokens/revoke")
         | (_, "/api/v1/sessions")
         | (_, "/api/sessions")
         | (_, "/api/v1/session")
@@ -287,13 +452,57 @@ fn file_response(path: &Path) -> Response {
     }
 }
 
-fn reject_api_request(request: &Request, options: &GatewayOptions) -> Option<Response> {
-    let expected = options.read_token.trim();
-    let token = request.read_token();
-    if token.as_deref() != Some(expected) {
-        return Some(Response::text(401, "Unauthorized", "unauthorized"));
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ApiAuth {
+    LegacyShare,
+    Account { token: String, user_id: String },
+}
+
+fn is_public_auth_route(request: &Request) -> bool {
+    matches!(
+        request.path(),
+        "/api/v1/auth/capabilities" | "/api/v1/auth/login" | "/api/v1/auth/signup"
+    )
+}
+
+fn authenticate_api_request(
+    request: &Request,
+    options: &GatewayOptions,
+) -> std::result::Result<ApiAuth, Response> {
+    let Some(token) = request.read_token() else {
+        return Err(Response::text(401, "Unauthorized", "unauthorized"));
+    };
+    if token == options.read_token.trim() {
+        return Ok(ApiAuth::LegacyShare);
     }
-    None
+    match daemon_rpc::<Option<AuthValidation>>(
+        options,
+        methods::AUTH_VALIDATE,
+        Some(rpc_params(AuthValidateParams {
+            token: token.clone(),
+        })),
+    ) {
+        Ok(Some(validation)) => Ok(ApiAuth::Account {
+            token,
+            user_id: validation.user.id,
+        }),
+        Ok(None) => Err(Response::text(401, "Unauthorized", "unauthorized")),
+        Err(error) => Err(daemon_error_response(error)),
+    }
+}
+
+fn user_id(auth: &Option<ApiAuth>) -> Option<String> {
+    match auth {
+        Some(ApiAuth::Account { user_id, .. }) => Some(user_id.clone()),
+        _ => None,
+    }
+}
+
+fn user_auth_token(auth: &Option<ApiAuth>) -> Option<String> {
+    match auth {
+        Some(ApiAuth::Account { token, .. }) => Some(token.clone()),
+        _ => None,
+    }
 }
 
 fn reject_terminal_token_request(request: &Request, options: &GatewayOptions) -> Option<Response> {
@@ -392,11 +601,7 @@ where
     if let Some(error) = response.error {
         return Err(DaemonRpcError::rpc(error));
     }
-    let result = response.result.ok_or_else(|| {
-        DaemonRpcError::Decode(anyhow::anyhow!(
-            "daemon {method} response did not include result"
-        ))
-    })?;
+    let result = response.result.unwrap_or(Value::Null);
     serde_json::from_value(result)
         .with_context(|| format!("failed to decode daemon {method} response"))
         .map_err(DaemonRpcError::Decode)
@@ -523,7 +728,7 @@ fn reject_terminal_websocket_request(
             "method not allowed",
         ));
     }
-    if let Some(response) = reject_api_request(request, options) {
+    if let Err(response) = authenticate_api_request(request, options) {
         return Some(response);
     }
     if let Some(response) = reject_terminal_token_request(request, options) {
@@ -896,6 +1101,32 @@ struct ShareSessionRequest {
     session: SessionRef,
 }
 
+#[derive(Debug, Deserialize)]
+struct AccountProfileBody {
+    display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountPasswordBody {
+    current_password: String,
+    new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceRevokeBody {
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccessTokenCreateBody {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccessTokenRevokeBody {
+    token_id: String,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct Request {
     method: String,
@@ -1222,6 +1453,210 @@ mod tests {
         daemon_handle.join().unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn public_auth_routes_do_not_require_api_token() {
+        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_once(|request| {
+            assert_eq!(request.method, methods::AUTH_CAPABILITIES);
+            JsonRpcResponse::success(
+                request.id,
+                serde_json::json!({
+                    "email_password": {
+                        "available": true,
+                        "configured": true,
+                        "reason": null
+                    },
+                    "signup_enabled": true,
+                    "signup_requires_bootstrap_token": true,
+                    "sso": [{
+                        "provider": "oidc",
+                        "available": false,
+                        "configured": false,
+                        "reason": "unconfigured"
+                    }]
+                }),
+            )
+        });
+        let mut options = gateway_options();
+        options.daemon_socket = Some(daemon_socket);
+        let request = Request {
+            method: "GET".to_string(),
+            target: "/api/v1/auth/capabilities".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+
+        let response = route_request(&request, &options);
+        let body = String::from_utf8(response.body).unwrap();
+
+        assert_eq!(response.status, 200);
+        assert!(body.contains("\"signup_enabled\":true"));
+        assert!(body.contains("\"available\":false"));
+        daemon_handle.join().unwrap();
+    }
+
+    #[test]
+    fn malformed_auth_json_returns_400_without_secret_leakage() {
+        let options = gateway_options();
+        let request = json_request(
+            "POST",
+            "/api/v1/auth/login",
+            r#"{ "email": "user@example.com", "password": "secret" "#,
+        );
+
+        let response = route_request(&request, &options);
+        let body = String::from_utf8(response.body).unwrap();
+
+        assert_eq!(response.status, 400);
+        assert!(!body.contains("secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auth_login_forwards_to_daemon_without_api_token() {
+        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_once(|request| {
+            assert_eq!(request.method, methods::AUTH_LOGIN);
+            let params: AuthLoginParams = serde_json::from_value(request.params.unwrap()).unwrap();
+            assert_eq!(params.email, "user@example.com");
+            assert_eq!(params.password, "password");
+            JsonRpcResponse::success(
+                request.id,
+                serde_json::json!({
+                    "user": account_user_json(),
+                    "session": device_session_json(),
+                    "session_token": "coca_sess_plaintext"
+                }),
+            )
+        });
+        let mut options = gateway_options();
+        options.daemon_socket = Some(daemon_socket);
+        let request = json_request(
+            "POST",
+            "/api/v1/auth/login",
+            r#"{ "email": "user@example.com", "password": "password", "device_label": "Browser" }"#,
+        );
+
+        let response = route_request(&request, &options);
+        let body = String::from_utf8(response.body).unwrap();
+
+        assert_eq!(response.status, 200);
+        assert!(body.contains("coca_sess_plaintext"));
+        assert!(!body.contains("password"));
+        daemon_handle.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn account_routes_validate_auth_token_then_forward_user_id() {
+        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_n(2, |idx, request| match idx {
+            0 => {
+                assert_eq!(request.method, methods::AUTH_VALIDATE);
+                let params: AuthValidateParams =
+                    serde_json::from_value(request.params.unwrap()).unwrap();
+                assert_eq!(params.token, "session-secret");
+                JsonRpcResponse::success(request.id, auth_validation_json())
+            }
+            1 => {
+                assert_eq!(request.method, methods::ACCOUNT_ME);
+                let params: AccountSubjectParams =
+                    serde_json::from_value(request.params.unwrap()).unwrap();
+                assert_eq!(params.user_id, "usr_1");
+                JsonRpcResponse::success(
+                    request.id,
+                    serde_json::json!({ "user": account_user_json() }),
+                )
+            }
+            _ => unreachable!(),
+        });
+        let mut options = gateway_options();
+        options.daemon_socket = Some(daemon_socket);
+        let request = Request {
+            method: "GET".to_string(),
+            target: "/api/v1/account/me".to_string(),
+            headers: vec![(
+                "authorization".to_string(),
+                "Bearer session-secret".to_string(),
+            )],
+            body: Vec::new(),
+        };
+
+        let response = route_request(&request, &options);
+        let body = String::from_utf8(response.body).unwrap();
+
+        assert_eq!(response.status, 200);
+        assert!(body.contains("user@example.com"));
+        assert!(!body.contains("session-secret"));
+        daemon_handle.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn revoked_auth_token_returns_401() {
+        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_once(|request| {
+            assert_eq!(request.method, methods::AUTH_VALIDATE);
+            JsonRpcResponse::success(request.id, serde_json::Value::Null)
+        });
+        let mut options = gateway_options();
+        options.daemon_socket = Some(daemon_socket);
+        let request = Request {
+            method: "GET".to_string(),
+            target: "/api/v1/account/me".to_string(),
+            headers: vec![(
+                "authorization".to_string(),
+                "Bearer revoked-secret".to_string(),
+            )],
+            body: Vec::new(),
+        };
+
+        let response = route_request(&request, &options);
+
+        assert_eq!(response.status, 401);
+        daemon_handle.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_api_routes_accept_daemon_auth_tokens() {
+        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_n(2, |idx, request| match idx {
+            0 => {
+                assert_eq!(request.method, methods::AUTH_VALIDATE);
+                JsonRpcResponse::success(request.id, auth_validation_json())
+            }
+            1 => {
+                assert_eq!(request.method, methods::SESSIONS_SUMMARIES);
+                JsonRpcResponse::success(
+                    request.id,
+                    serde_json::json!({
+                        "sessions": [],
+                        "warnings": [],
+                        "counts": {
+                            "total": 0,
+                            "by_provider": {},
+                            "by_origin": {}
+                        }
+                    }),
+                )
+            }
+            _ => unreachable!(),
+        });
+        let mut options = gateway_options();
+        options.daemon_socket = Some(daemon_socket);
+        let request = Request {
+            method: "GET".to_string(),
+            target: "/api/v1/sessions".to_string(),
+            headers: vec![(
+                "authorization".to_string(),
+                "Bearer session-secret".to_string(),
+            )],
+            body: Vec::new(),
+        };
+
+        let response = route_request(&request, &options);
+
+        assert_eq!(response.status, 200);
+        daemon_handle.join().unwrap();
+    }
+
     #[test]
     fn websocket_accept_key_matches_rfc_example() {
         assert_eq!(
@@ -1259,7 +1694,7 @@ mod tests {
             reject_terminal_websocket_request(&bad_read, &options)
                 .unwrap()
                 .status,
-            401
+            503
         );
         assert!(reject_terminal_websocket_request(&accepted, &options).is_none());
     }
@@ -1687,6 +2122,64 @@ mod tests {
         daemon_handle.join().unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn terminal_sessions_accept_auth_token_but_still_require_terminal_token() {
+        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_n(3, |idx, request| match idx {
+            0 => {
+                assert_eq!(request.method, methods::AUTH_VALIDATE);
+                JsonRpcResponse::success(request.id, auth_validation_json())
+            }
+            1 => {
+                assert_eq!(request.method, methods::AUTH_VALIDATE);
+                JsonRpcResponse::success(request.id, auth_validation_json())
+            }
+            2 => {
+                assert_eq!(request.method, methods::TERMINAL_LIST);
+                JsonRpcResponse::success(
+                    request.id,
+                    serde_json::to_value(TerminalListResult {
+                        terminals: vec![terminal_summary()],
+                    })
+                    .unwrap(),
+                )
+            }
+            _ => unreachable!(),
+        });
+        let mut options = gateway_options();
+        options.daemon_socket = Some(daemon_socket);
+        options.terminal_enabled = true;
+        options.terminal_token = "terminal-secret".to_string();
+        let missing_terminal = Request {
+            method: "GET".to_string(),
+            target: "/api/v1/terminal/sessions".to_string(),
+            headers: vec![(
+                "authorization".to_string(),
+                "Bearer session-secret".to_string(),
+            )],
+            body: Vec::new(),
+        };
+        let accepted = Request {
+            method: "GET".to_string(),
+            target: "/api/v1/terminal/sessions".to_string(),
+            headers: vec![
+                (
+                    "authorization".to_string(),
+                    "Bearer session-secret".to_string(),
+                ),
+                (
+                    "x-coca-terminal-token".to_string(),
+                    "terminal-secret".to_string(),
+                ),
+            ],
+            body: Vec::new(),
+        };
+
+        assert_eq!(route_request(&missing_terminal, &options).status, 403);
+        assert_eq!(route_request(&accepted, &options).status, 200);
+        daemon_handle.join().unwrap();
+    }
+
     fn json_request(method: &str, target: &str, body: &str) -> Request {
         Request {
             method: method.to_string(),
@@ -1725,6 +2218,60 @@ mod tests {
         });
         wait_for_path(&daemon_socket);
         (dir, daemon_socket, daemon_handle)
+    }
+
+    #[cfg(unix)]
+    fn spawn_daemon_n<F>(
+        count: usize,
+        mut handler: F,
+    ) -> (tempfile::TempDir, PathBuf, std::thread::JoinHandle<()>)
+    where
+        F: FnMut(usize, JsonRpcRequest) -> JsonRpcResponse + Send + 'static,
+    {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let daemon_socket = dir.path().join("daemon.sock");
+        let server_socket = daemon_socket.clone();
+        let daemon_handle = std::thread::spawn(move || {
+            let listener = UnixListener::bind(&server_socket).unwrap();
+            for idx in 0..count {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request: JsonRpcRequest = coca_ipc::read_json_frame(&mut stream).unwrap();
+                let response = handler(idx, request);
+                coca_ipc::write_json_frame(&mut stream, &response).unwrap();
+            }
+        });
+        wait_for_path(&daemon_socket);
+        (dir, daemon_socket, daemon_handle)
+    }
+
+    fn account_user_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": "usr_1",
+            "email": "user@example.com",
+            "display_name": "User",
+            "created_at_ms": 1,
+            "updated_at_ms": 1
+        })
+    }
+
+    fn device_session_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": "dev_1",
+            "label": "Browser",
+            "created_at_ms": 1,
+            "last_seen_at_ms": 1,
+            "revoked_at_ms": null
+        })
+    }
+
+    fn auth_validation_json() -> serde_json::Value {
+        serde_json::json!({
+            "user": account_user_json(),
+            "credential_id": "dev_1",
+            "credential_kind": "DeviceSession"
+        })
     }
 
     fn terminal_upgrade_request(target: &str, key: &str) -> Request {

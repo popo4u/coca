@@ -10,7 +10,11 @@ use coca_core::launch::{
 };
 use coca_core::model::{ProviderFilter, ProviderKind, Session, SessionOrigin};
 use coca_core::settings::{save_settings, AiSettings, Settings};
-use coca_core::storage::{default_database_path, DerivedStore};
+use coca_core::storage::{
+    default_database_path, generate_id, generate_token, hash_password, normalize_email, token_hash,
+    verify_password, AuthCredentialKind, DerivedStore, NewAccessToken, NewDeviceSession, NewUser,
+    StoredAccessToken, StoredAuthCredential, StoredDeviceSession, StoredUser,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
@@ -235,12 +239,225 @@ impl AppService {
         Ok(default_resume_target(session))
     }
 
+    pub fn auth_capabilities(&self) -> Result<AuthCapabilities> {
+        let store = self.auth_store()?;
+        let user_count = store.user_count()?;
+        Ok(AuthCapabilities {
+            email_password: AuthProviderCapability {
+                available: true,
+                configured: true,
+                reason: None,
+            },
+            signup_enabled: user_count == 0,
+            signup_requires_bootstrap_token: user_count == 0,
+            sso: vec![SsoCapability {
+                provider: "oidc".to_string(),
+                available: false,
+                configured: false,
+                reason: Some("unconfigured".to_string()),
+            }],
+        })
+    }
+
+    pub fn auth_signup(&self, input: AuthSignupInput) -> Result<AuthSessionResponse> {
+        let email = normalize_email(&input.email);
+        ensure_email(&email)?;
+        ensure_password(&input.password)?;
+        let store = self.auth_store()?;
+        if store.user_count()? > 0 {
+            anyhow::bail!("signup is disabled after the first account is created");
+        }
+        let expected_bootstrap = self.options.settings.share.token.trim();
+        if expected_bootstrap.is_empty()
+            || input.bootstrap_token.as_deref().map(str::trim) != Some(expected_bootstrap)
+        {
+            anyhow::bail!("bootstrap token is required for first signup");
+        }
+
+        let password_hash = hash_password(&input.password)?;
+        let user = store.create_user(NewUser {
+            id: &generate_id("usr"),
+            email: &email,
+            password_hash: &password_hash,
+            display_name: trimmed_optional(input.display_name.as_deref()).as_deref(),
+        })?;
+        self.issue_device_session(&store, user, input.device_label.as_deref())
+    }
+
+    pub fn auth_login(&self, input: AuthLoginInput) -> Result<AuthSessionResponse> {
+        let store = self.auth_store()?;
+        let Some(stored) = store.user_by_email(&input.email)? else {
+            anyhow::bail!("invalid email or password");
+        };
+        if !verify_password(&input.password, &stored.password_hash) {
+            anyhow::bail!("invalid email or password");
+        }
+        self.issue_device_session(&store, stored.user, input.device_label.as_deref())
+    }
+
+    pub fn auth_validate(&self, token: &str) -> Result<Option<AuthValidation>> {
+        let token = token.trim();
+        if token.is_empty() {
+            return Ok(None);
+        }
+        let store = self.auth_store()?;
+        let hash = token_hash(token);
+        if let Some(credential) = store.validate_device_session(&hash)? {
+            return Ok(Some(AuthValidation::from_credential(credential)));
+        }
+        Ok(store
+            .validate_access_token(&hash)?
+            .map(AuthValidation::from_credential))
+    }
+
+    pub fn auth_logout(&self, token: &str) -> Result<bool> {
+        let Some(validation) = self.auth_validate(token)? else {
+            return Ok(false);
+        };
+        if validation.credential_kind == AuthCredentialKindDto::DeviceSession {
+            let store = self.auth_store()?;
+            return store.revoke_device_session(&validation.user.id, &validation.credential_id);
+        }
+        Ok(false)
+    }
+
+    pub fn account_me(&self, user_id: &str) -> Result<AccountMe> {
+        let store = self.auth_store()?;
+        let user = store
+            .user_by_id(user_id)?
+            .ok_or_else(|| anyhow::anyhow!("authenticated account was not found"))?;
+        Ok(AccountMe {
+            user: AccountUser::from(user),
+        })
+    }
+
+    pub fn update_account_profile(
+        &self,
+        user_id: &str,
+        input: AccountProfileUpdateInput,
+    ) -> Result<AccountMe> {
+        let store = self.auth_store()?;
+        let display_name = trimmed_optional(input.display_name.as_deref());
+        let user = store.update_user_profile(user_id, display_name.as_deref())?;
+        Ok(AccountMe {
+            user: AccountUser::from(user),
+        })
+    }
+
+    pub fn update_account_password(
+        &self,
+        user_id: &str,
+        input: AccountPasswordUpdateInput,
+    ) -> Result<()> {
+        ensure_password(&input.new_password)?;
+        let store = self.auth_store()?;
+        let user = store
+            .user_by_id(user_id)?
+            .ok_or_else(|| anyhow::anyhow!("authenticated account was not found"))?;
+        let stored = store
+            .user_by_email(&user.email)?
+            .ok_or_else(|| anyhow::anyhow!("authenticated account was not found"))?;
+        if !verify_password(&input.current_password, &stored.password_hash) {
+            anyhow::bail!("current password is invalid");
+        }
+        let password_hash = hash_password(&input.new_password)?;
+        store.update_user_password_hash(user_id, &password_hash)
+    }
+
+    pub fn account_devices(&self, user_id: &str) -> Result<DeviceSessionsResponse> {
+        let store = self.auth_store()?;
+        Ok(DeviceSessionsResponse {
+            devices: store
+                .list_device_sessions(user_id)?
+                .into_iter()
+                .map(DeviceSessionDto::from)
+                .collect(),
+        })
+    }
+
+    pub fn revoke_account_device(&self, user_id: &str, session_id: &str) -> Result<RevokeResponse> {
+        let store = self.auth_store()?;
+        Ok(RevokeResponse {
+            revoked: store.revoke_device_session(user_id, session_id)?,
+        })
+    }
+
+    pub fn account_tokens(&self, user_id: &str) -> Result<AccessTokensResponse> {
+        let store = self.auth_store()?;
+        Ok(AccessTokensResponse {
+            tokens: store
+                .list_access_tokens(user_id)?
+                .into_iter()
+                .map(AccessTokenDto::from)
+                .collect(),
+        })
+    }
+
+    pub fn create_account_token(
+        &self,
+        user_id: &str,
+        input: AccessTokenCreateInput,
+    ) -> Result<AccessTokenCreateResponse> {
+        let name = input.name.trim();
+        if name.is_empty() {
+            anyhow::bail!("access token name must not be empty");
+        }
+        let store = self.auth_store()?;
+        let plaintext = generate_token("coca_pat");
+        let hash = token_hash(&plaintext);
+        let token = store.create_access_token(NewAccessToken {
+            id: &generate_id("tok"),
+            user_id,
+            name,
+            token_hash: &hash,
+        })?;
+        Ok(AccessTokenCreateResponse {
+            token: AccessTokenDto::from(token),
+            plaintext_token: plaintext,
+        })
+    }
+
+    pub fn revoke_account_token(&self, user_id: &str, token_id: &str) -> Result<RevokeResponse> {
+        let store = self.auth_store()?;
+        Ok(RevokeResponse {
+            revoked: store.revoke_access_token(user_id, token_id)?,
+        })
+    }
+
     fn store_catalog(&self, sessions: &[Session]) -> Result<()> {
         let Some(path) = self.database_path() else {
             return Ok(());
         };
         let mut store = DerivedStore::open(&path)?;
         store.replace_sessions(sessions)
+    }
+
+    fn auth_store(&self) -> Result<DerivedStore> {
+        let path = self
+            .database_path()
+            .ok_or_else(|| anyhow::anyhow!("failed to resolve coca database path"))?;
+        DerivedStore::open(&path)
+    }
+
+    fn issue_device_session(
+        &self,
+        store: &DerivedStore,
+        user: StoredUser,
+        label: Option<&str>,
+    ) -> Result<AuthSessionResponse> {
+        let session_token = generate_token("coca_sess");
+        let session_token_hash = token_hash(&session_token);
+        let session = store.create_device_session(NewDeviceSession {
+            id: &generate_id("dev"),
+            user_id: &user.id,
+            token_hash: &session_token_hash,
+            label: trimmed_optional(label).as_deref(),
+        })?;
+        Ok(AuthSessionResponse {
+            user: AccountUser::from(user),
+            session: DeviceSessionDto::from(session),
+            session_token,
+        })
     }
 
     fn database_path(&self) -> Option<PathBuf> {
@@ -505,6 +722,189 @@ pub struct AiSettingsUpdate {
     pub api_key: Option<String>,
     #[serde(default)]
     pub clear_api_key: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AuthCapabilities {
+    pub email_password: AuthProviderCapability,
+    pub signup_enabled: bool,
+    pub signup_requires_bootstrap_token: bool,
+    pub sso: Vec<SsoCapability>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AuthProviderCapability {
+    pub available: bool,
+    pub configured: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SsoCapability {
+    pub provider: String,
+    pub available: bool,
+    pub configured: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AuthSignupInput {
+    pub email: String,
+    pub password: String,
+    pub display_name: Option<String>,
+    pub device_label: Option<String>,
+    pub bootstrap_token: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AuthLoginInput {
+    pub email: String,
+    pub password: String,
+    pub device_label: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AuthSessionResponse {
+    pub user: AccountUser,
+    pub session: DeviceSessionDto,
+    pub session_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AuthValidation {
+    pub user: AccountUser,
+    pub credential_id: String,
+    pub credential_kind: AuthCredentialKindDto,
+}
+
+impl AuthValidation {
+    fn from_credential(credential: StoredAuthCredential) -> Self {
+        Self {
+            user: AccountUser::from(credential.user),
+            credential_id: credential.credential_id,
+            credential_kind: AuthCredentialKindDto::from(credential.credential_kind),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum AuthCredentialKindDto {
+    DeviceSession,
+    AccessToken,
+}
+
+impl From<AuthCredentialKind> for AuthCredentialKindDto {
+    fn from(value: AuthCredentialKind) -> Self {
+        match value {
+            AuthCredentialKind::DeviceSession => Self::DeviceSession,
+            AuthCredentialKind::AccessToken => Self::AccessToken,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccountUser {
+    pub id: String,
+    pub email: String,
+    pub display_name: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+impl From<StoredUser> for AccountUser {
+    fn from(value: StoredUser) -> Self {
+        Self {
+            id: value.id,
+            email: value.email,
+            display_name: value.display_name,
+            created_at_ms: value.created_at_ms,
+            updated_at_ms: value.updated_at_ms,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccountMe {
+    pub user: AccountUser,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccountProfileUpdateInput {
+    pub display_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccountPasswordUpdateInput {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeviceSessionsResponse {
+    pub devices: Vec<DeviceSessionDto>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeviceSessionDto {
+    pub id: String,
+    pub label: Option<String>,
+    pub created_at_ms: i64,
+    pub last_seen_at_ms: i64,
+    pub revoked_at_ms: Option<i64>,
+}
+
+impl From<StoredDeviceSession> for DeviceSessionDto {
+    fn from(value: StoredDeviceSession) -> Self {
+        Self {
+            id: value.id,
+            label: value.label,
+            created_at_ms: value.created_at_ms,
+            last_seen_at_ms: value.last_seen_at_ms,
+            revoked_at_ms: value.revoked_at_ms,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccessTokensResponse {
+    pub tokens: Vec<AccessTokenDto>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccessTokenDto {
+    pub id: String,
+    pub name: String,
+    pub created_at_ms: i64,
+    pub last_used_at_ms: Option<i64>,
+    pub revoked_at_ms: Option<i64>,
+}
+
+impl From<StoredAccessToken> for AccessTokenDto {
+    fn from(value: StoredAccessToken) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            created_at_ms: value.created_at_ms,
+            last_used_at_ms: value.last_used_at_ms,
+            revoked_at_ms: value.revoked_at_ms,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccessTokenCreateInput {
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccessTokenCreateResponse {
+    pub token: AccessTokenDto,
+    pub plaintext_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RevokeResponse {
+    pub revoked: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -781,6 +1181,27 @@ fn ensure_terminal_enabled(settings: &Settings) -> Result<()> {
     Ok(())
 }
 
+fn ensure_email(email: &str) -> Result<()> {
+    if email.is_empty() || !email.contains('@') {
+        anyhow::bail!("email must be a valid email address");
+    }
+    Ok(())
+}
+
+fn ensure_password(password: &str) -> Result<()> {
+    if password.trim().is_empty() {
+        anyhow::bail!("password must not be empty");
+    }
+    Ok(())
+}
+
+fn trimmed_optional(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn remote_terminal_unavailable(
     enabled: bool,
     token_configured: bool,
@@ -998,6 +1419,186 @@ mod tests {
         assert!(service.settings().ai.api_key.is_empty());
     }
 
+    #[test]
+    fn auth_signup_requires_bootstrap_then_disables_signup() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = app_service_with_db(settings_with_share_token(), dir.path().join("auth.db"));
+
+        let capabilities = service.auth_capabilities().unwrap();
+        assert!(capabilities.signup_enabled);
+        assert!(capabilities.signup_requires_bootstrap_token);
+        assert!(!capabilities.sso[0].available);
+
+        let missing_bootstrap = service
+            .auth_signup(AuthSignupInput {
+                email: "user@example.com".to_string(),
+                password: "password".to_string(),
+                display_name: None,
+                device_label: None,
+                bootstrap_token: None,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(missing_bootstrap.contains("bootstrap token"));
+
+        let response = service
+            .auth_signup(AuthSignupInput {
+                email: " USER@Example.COM ".to_string(),
+                password: "password".to_string(),
+                display_name: Some(" User ".to_string()),
+                device_label: Some(" Browser ".to_string()),
+                bootstrap_token: Some("share-secret".to_string()),
+            })
+            .unwrap();
+
+        assert_eq!(response.user.email, "user@example.com");
+        assert_eq!(response.user.display_name.as_deref(), Some("User"));
+        assert!(response.session_token.starts_with("coca_sess_"));
+        assert!(!serde_json::to_string(&response)
+            .unwrap()
+            .contains("share-secret"));
+        assert!(!service.auth_capabilities().unwrap().signup_enabled);
+        assert!(service
+            .auth_signup(AuthSignupInput {
+                email: "second@example.com".to_string(),
+                password: "password".to_string(),
+                display_name: None,
+                device_label: None,
+                bootstrap_token: Some("share-secret".to_string()),
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("signup is disabled"));
+    }
+
+    #[test]
+    fn auth_login_validate_logout_and_profile_password_workflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = app_service_with_db(settings_with_share_token(), dir.path().join("auth.db"));
+        let signup = signup_user(&service);
+
+        let login = service
+            .auth_login(AuthLoginInput {
+                email: "user@example.com".to_string(),
+                password: "password".to_string(),
+                device_label: Some("Browser".to_string()),
+            })
+            .unwrap();
+        let validation = service
+            .auth_validate(&login.session_token)
+            .unwrap()
+            .expect("valid auth token");
+        assert_eq!(validation.user.email, "user@example.com");
+        assert_eq!(
+            validation.credential_kind,
+            AuthCredentialKindDto::DeviceSession
+        );
+
+        let profile = service
+            .update_account_profile(
+                &validation.user.id,
+                AccountProfileUpdateInput {
+                    display_name: Some("Renamed".to_string()),
+                },
+            )
+            .unwrap();
+        assert_eq!(profile.user.display_name.as_deref(), Some("Renamed"));
+        service
+            .update_account_password(
+                &validation.user.id,
+                AccountPasswordUpdateInput {
+                    current_password: "password".to_string(),
+                    new_password: "new-password".to_string(),
+                },
+            )
+            .unwrap();
+        assert!(service
+            .auth_login(AuthLoginInput {
+                email: "user@example.com".to_string(),
+                password: "password".to_string(),
+                device_label: None,
+            })
+            .is_err());
+        assert!(service
+            .auth_login(AuthLoginInput {
+                email: "user@example.com".to_string(),
+                password: "new-password".to_string(),
+                device_label: None,
+            })
+            .is_ok());
+
+        assert!(service.auth_logout(&login.session_token).unwrap());
+        assert!(service
+            .auth_validate(&login.session_token)
+            .unwrap()
+            .is_none());
+        assert!(service
+            .auth_validate(&signup.session_token)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn account_tokens_are_returned_plaintext_once_and_can_be_revoked() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = app_service_with_db(settings_with_share_token(), dir.path().join("auth.db"));
+        let signup = signup_user(&service);
+        let user_id = signup.user.id.clone();
+
+        let created = service
+            .create_account_token(
+                &user_id,
+                AccessTokenCreateInput {
+                    name: "CI".to_string(),
+                },
+            )
+            .unwrap();
+        assert!(created.plaintext_token.starts_with("coca_pat_"));
+        let listed = service.account_tokens(&user_id).unwrap();
+        let listed_json = serde_json::to_string(&listed).unwrap();
+        assert_eq!(listed.tokens.len(), 1);
+        assert!(!listed_json.contains(&created.plaintext_token));
+
+        let validation = service
+            .auth_validate(&created.plaintext_token)
+            .unwrap()
+            .expect("valid access token");
+        assert_eq!(
+            validation.credential_kind,
+            AuthCredentialKindDto::AccessToken
+        );
+        assert!(
+            service
+                .revoke_account_token(&user_id, &created.token.id)
+                .unwrap()
+                .revoked
+        );
+        assert!(service
+            .auth_validate(&created.plaintext_token)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn account_devices_list_and_revoke() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = app_service_with_db(settings_with_share_token(), dir.path().join("auth.db"));
+        let signup = signup_user(&service);
+
+        let devices = service.account_devices(&signup.user.id).unwrap();
+        assert_eq!(devices.devices.len(), 1);
+        assert!(
+            service
+                .revoke_account_device(&signup.user.id, &devices.devices[0].id)
+                .unwrap()
+                .revoked
+        );
+        assert!(service
+            .auth_validate(&signup.session_token)
+            .unwrap()
+            .is_none());
+    }
+
     fn app_service(settings: Settings) -> AppService {
         AppService::new(AppOptions {
             settings,
@@ -1007,6 +1608,36 @@ mod tests {
             provider_filter: ProviderFilter::All,
             database_path: None,
         })
+    }
+
+    fn app_service_with_db(settings: Settings, database_path: PathBuf) -> AppService {
+        AppService::new(AppOptions {
+            settings,
+            settings_path: None,
+            codex_home: None,
+            claude_home: None,
+            provider_filter: ProviderFilter::All,
+            database_path: Some(database_path),
+        })
+    }
+
+    fn settings_with_share_token() -> Settings {
+        let mut settings = Settings::default();
+        settings.ensure_defaults();
+        settings.share.token = "share-secret".to_string();
+        settings
+    }
+
+    fn signup_user(service: &AppService) -> AuthSessionResponse {
+        service
+            .auth_signup(AuthSignupInput {
+                email: "user@example.com".to_string(),
+                password: "password".to_string(),
+                display_name: Some("User".to_string()),
+                device_label: Some("Browser".to_string()),
+                bootstrap_token: Some("share-secret".to_string()),
+            })
+            .unwrap()
     }
 
     fn session() -> Session {

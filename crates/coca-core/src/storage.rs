@@ -3,11 +3,17 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
+use rand::{distributions::Alphanumeric, Rng};
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 
 use crate::model::Session;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub fn default_database_path() -> Option<PathBuf> {
     dirs::data_local_dir()
@@ -227,6 +233,366 @@ impl DerivedStore {
         Ok(())
     }
 
+    pub fn user_count(&self) -> Result<usize> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM auth_users", [], |row| {
+                let count: i64 = row.get(0)?;
+                Ok(count as usize)
+            })
+            .context("failed to count auth users")
+    }
+
+    pub fn create_user(&self, input: NewUser<'_>) -> Result<StoredUser> {
+        let now = now_ms();
+        let email = normalize_email(input.email);
+        self.conn
+            .execute(
+                r#"
+                INSERT INTO auth_users (
+                    id, email, password_hash, display_name, created_at_ms, updated_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "#,
+                params![
+                    input.id,
+                    email,
+                    input.password_hash,
+                    input.display_name,
+                    now,
+                    now,
+                ],
+            )
+            .context("failed to create auth user")?;
+        self.user_by_id(input.id)?
+            .context("created auth user was not found")
+    }
+
+    pub fn user_by_id(&self, id: &str) -> Result<Option<StoredUser>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT id, email, display_name, created_at_ms, updated_at_ms
+                FROM auth_users
+                WHERE id = ?1
+                "#,
+                params![id],
+                stored_user_from_row,
+            )
+            .optional()
+            .context("failed to load auth user")
+    }
+
+    pub fn user_by_email(&self, email: &str) -> Result<Option<StoredUserWithPassword>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT id, email, password_hash, display_name, created_at_ms, updated_at_ms
+                FROM auth_users
+                WHERE email = ?1
+                "#,
+                params![normalize_email(email)],
+                stored_user_with_password_from_row,
+            )
+            .optional()
+            .context("failed to load auth user by email")
+    }
+
+    pub fn update_user_profile(
+        &self,
+        user_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<StoredUser> {
+        let now = now_ms();
+        self.conn
+            .execute(
+                r#"
+                UPDATE auth_users
+                SET display_name = ?2, updated_at_ms = ?3
+                WHERE id = ?1
+                "#,
+                params![user_id, display_name, now],
+            )
+            .context("failed to update auth user profile")?;
+        self.user_by_id(user_id)?.context("auth user was not found")
+    }
+
+    pub fn update_user_password_hash(&self, user_id: &str, password_hash: &str) -> Result<()> {
+        let now = now_ms();
+        self.conn
+            .execute(
+                r#"
+                UPDATE auth_users
+                SET password_hash = ?2, updated_at_ms = ?3
+                WHERE id = ?1
+                "#,
+                params![user_id, password_hash, now],
+            )
+            .context("failed to update auth user password")?;
+        Ok(())
+    }
+
+    pub fn create_device_session(
+        &self,
+        input: NewDeviceSession<'_>,
+    ) -> Result<StoredDeviceSession> {
+        let now = now_ms();
+        self.conn
+            .execute(
+                r#"
+                INSERT INTO auth_device_sessions (
+                    id, user_id, token_hash, label, created_at_ms, last_seen_at_ms, revoked_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+                "#,
+                params![
+                    input.id,
+                    input.user_id,
+                    input.token_hash,
+                    input.label,
+                    now,
+                    now,
+                ],
+            )
+            .context("failed to create auth device session")?;
+        self.device_session_by_id(input.user_id, input.id)?
+            .context("created auth device session was not found")
+    }
+
+    pub fn validate_device_session(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredAuthCredential>> {
+        let Some((session, user)) = self
+            .conn
+            .query_row(
+                r#"
+                SELECT
+                    s.id, s.user_id, s.label, s.created_at_ms, s.last_seen_at_ms, s.revoked_at_ms,
+                    u.id, u.email, u.display_name, u.created_at_ms, u.updated_at_ms
+                FROM auth_device_sessions s
+                JOIN auth_users u ON u.id = s.user_id
+                WHERE s.token_hash = ?1 AND s.revoked_at_ms IS NULL
+                "#,
+                params![token_hash],
+                |row| {
+                    Ok((
+                        StoredDeviceSession {
+                            id: row.get(0)?,
+                            user_id: row.get(1)?,
+                            label: row.get(2)?,
+                            created_at_ms: row.get(3)?,
+                            last_seen_at_ms: row.get(4)?,
+                            revoked_at_ms: row.get(5)?,
+                        },
+                        StoredUser {
+                            id: row.get(6)?,
+                            email: row.get(7)?,
+                            display_name: row.get(8)?,
+                            created_at_ms: row.get(9)?,
+                            updated_at_ms: row.get(10)?,
+                        },
+                    ))
+                },
+            )
+            .optional()
+            .context("failed to validate auth device session")?
+        else {
+            return Ok(None);
+        };
+        self.touch_device_session(&session.id)?;
+        Ok(Some(StoredAuthCredential {
+            user,
+            credential_id: session.id,
+            credential_kind: AuthCredentialKind::DeviceSession,
+        }))
+    }
+
+    pub fn list_device_sessions(&self, user_id: &str) -> Result<Vec<StoredDeviceSession>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT id, user_id, label, created_at_ms, last_seen_at_ms, revoked_at_ms
+                FROM auth_device_sessions
+                WHERE user_id = ?1
+                ORDER BY created_at_ms DESC
+                "#,
+            )
+            .context("failed to prepare auth device sessions query")?;
+        let rows = stmt
+            .query_map(params![user_id], stored_device_session_from_row)
+            .context("failed to query auth device sessions")?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to read auth device sessions")
+    }
+
+    pub fn revoke_device_session(&self, user_id: &str, session_id: &str) -> Result<bool> {
+        let changed = self
+            .conn
+            .execute(
+                r#"
+                UPDATE auth_device_sessions
+                SET revoked_at_ms = ?3
+                WHERE user_id = ?1 AND id = ?2 AND revoked_at_ms IS NULL
+                "#,
+                params![user_id, session_id, now_ms()],
+            )
+            .context("failed to revoke auth device session")?;
+        Ok(changed > 0)
+    }
+
+    pub fn create_access_token(&self, input: NewAccessToken<'_>) -> Result<StoredAccessToken> {
+        let now = now_ms();
+        self.conn
+            .execute(
+                r#"
+                INSERT INTO auth_access_tokens (
+                    id, user_id, name, token_hash, created_at_ms, last_used_at_ms, revoked_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL)
+                "#,
+                params![input.id, input.user_id, input.name, input.token_hash, now],
+            )
+            .context("failed to create auth access token")?;
+        self.access_token_by_id(input.user_id, input.id)?
+            .context("created auth access token was not found")
+    }
+
+    pub fn validate_access_token(&self, token_hash: &str) -> Result<Option<StoredAuthCredential>> {
+        let Some((token, user)) = self
+            .conn
+            .query_row(
+                r#"
+                SELECT
+                    t.id, t.user_id, t.name, t.created_at_ms, t.last_used_at_ms, t.revoked_at_ms,
+                    u.id, u.email, u.display_name, u.created_at_ms, u.updated_at_ms
+                FROM auth_access_tokens t
+                JOIN auth_users u ON u.id = t.user_id
+                WHERE t.token_hash = ?1 AND t.revoked_at_ms IS NULL
+                "#,
+                params![token_hash],
+                |row| {
+                    Ok((
+                        StoredAccessToken {
+                            id: row.get(0)?,
+                            user_id: row.get(1)?,
+                            name: row.get(2)?,
+                            created_at_ms: row.get(3)?,
+                            last_used_at_ms: row.get(4)?,
+                            revoked_at_ms: row.get(5)?,
+                        },
+                        StoredUser {
+                            id: row.get(6)?,
+                            email: row.get(7)?,
+                            display_name: row.get(8)?,
+                            created_at_ms: row.get(9)?,
+                            updated_at_ms: row.get(10)?,
+                        },
+                    ))
+                },
+            )
+            .optional()
+            .context("failed to validate auth access token")?
+        else {
+            return Ok(None);
+        };
+        self.touch_access_token(&token.id)?;
+        Ok(Some(StoredAuthCredential {
+            user,
+            credential_id: token.id,
+            credential_kind: AuthCredentialKind::AccessToken,
+        }))
+    }
+
+    pub fn list_access_tokens(&self, user_id: &str) -> Result<Vec<StoredAccessToken>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT id, user_id, name, created_at_ms, last_used_at_ms, revoked_at_ms
+                FROM auth_access_tokens
+                WHERE user_id = ?1
+                ORDER BY created_at_ms DESC
+                "#,
+            )
+            .context("failed to prepare auth access tokens query")?;
+        let rows = stmt
+            .query_map(params![user_id], stored_access_token_from_row)
+            .context("failed to query auth access tokens")?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to read auth access tokens")
+    }
+
+    pub fn revoke_access_token(&self, user_id: &str, token_id: &str) -> Result<bool> {
+        let changed = self
+            .conn
+            .execute(
+                r#"
+                UPDATE auth_access_tokens
+                SET revoked_at_ms = ?3
+                WHERE user_id = ?1 AND id = ?2 AND revoked_at_ms IS NULL
+                "#,
+                params![user_id, token_id, now_ms()],
+            )
+            .context("failed to revoke auth access token")?;
+        Ok(changed > 0)
+    }
+
+    fn device_session_by_id(
+        &self,
+        user_id: &str,
+        session_id: &str,
+    ) -> Result<Option<StoredDeviceSession>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT id, user_id, label, created_at_ms, last_seen_at_ms, revoked_at_ms
+                FROM auth_device_sessions
+                WHERE user_id = ?1 AND id = ?2
+                "#,
+                params![user_id, session_id],
+                stored_device_session_from_row,
+            )
+            .optional()
+            .context("failed to load auth device session")
+    }
+
+    fn access_token_by_id(
+        &self,
+        user_id: &str,
+        token_id: &str,
+    ) -> Result<Option<StoredAccessToken>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT id, user_id, name, created_at_ms, last_used_at_ms, revoked_at_ms
+                FROM auth_access_tokens
+                WHERE user_id = ?1 AND id = ?2
+                "#,
+                params![user_id, token_id],
+                stored_access_token_from_row,
+            )
+            .optional()
+            .context("failed to load auth access token")
+    }
+
+    fn touch_device_session(&self, session_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE auth_device_sessions SET last_seen_at_ms = ?2 WHERE id = ?1",
+                params![session_id, now_ms()],
+            )
+            .context("failed to update auth device session last_seen")?;
+        Ok(())
+    }
+
+    fn touch_access_token(&self, token_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE auth_access_tokens SET last_used_at_ms = ?2 WHERE id = ?1",
+                params![token_id, now_ms()],
+            )
+            .context("failed to update auth access token last_used")?;
+        Ok(())
+    }
+
     fn migrate(&self) -> Result<()> {
         self.conn
             .execute_batch("PRAGMA foreign_keys = ON")
@@ -237,10 +603,10 @@ impl DerivedStore {
             .context("failed to read storage schema version")?;
 
         match version {
-            0 => self
-                .conn
-                .execute_batch(
-                    r#"
+            0 => {
+                self.conn
+                    .execute_batch(
+                        r#"
                     CREATE TABLE sessions (
                         origin TEXT NOT NULL,
                         provider TEXT NOT NULL,
@@ -275,17 +641,65 @@ impl DerivedStore {
                         updated_at_ms INTEGER NOT NULL,
                         PRIMARY KEY(origin, provider, id, source_hash, generator)
                     );
-
-                    PRAGMA user_version = 1;
                     "#,
-                )
-                .context("failed to migrate storage schema"),
+                    )
+                    .context("failed to migrate storage schema to version 1")?;
+                self.migrate_auth_schema()
+            }
+            1 => self.migrate_auth_schema(),
             SCHEMA_VERSION => Ok(()),
             newer if newer > SCHEMA_VERSION => bail!(
                 "storage schema version {newer} is newer than supported version {SCHEMA_VERSION}"
             ),
             older => bail!("unsupported storage schema version {older}"),
         }
+    }
+
+    fn migrate_auth_schema(&self) -> Result<()> {
+        self.conn
+            .execute_batch(
+                r#"
+                CREATE TABLE auth_users (
+                    id TEXT PRIMARY KEY,
+                    email TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    display_name TEXT,
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL
+                );
+
+                CREATE TABLE auth_device_sessions (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    label TEXT,
+                    created_at_ms INTEGER NOT NULL,
+                    last_seen_at_ms INTEGER NOT NULL,
+                    revoked_at_ms INTEGER,
+                    FOREIGN KEY(user_id) REFERENCES auth_users(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX idx_auth_device_sessions_user
+                    ON auth_device_sessions(user_id, revoked_at_ms, created_at_ms DESC);
+
+                CREATE TABLE auth_access_tokens (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    created_at_ms INTEGER NOT NULL,
+                    last_used_at_ms INTEGER,
+                    revoked_at_ms INTEGER,
+                    FOREIGN KEY(user_id) REFERENCES auth_users(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX idx_auth_access_tokens_user
+                    ON auth_access_tokens(user_id, revoked_at_ms, created_at_ms DESC);
+
+                PRAGMA user_version = 2;
+                "#,
+            )
+            .context("failed to migrate storage schema to version 2")
     }
 }
 
@@ -314,9 +728,173 @@ pub struct SessionSummaryInput<'a> {
     pub summary: Option<&'a str>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredUser {
+    pub id: String,
+    pub email: String,
+    pub display_name: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredUserWithPassword {
+    pub user: StoredUser,
+    pub password_hash: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NewUser<'a> {
+    pub id: &'a str,
+    pub email: &'a str,
+    pub password_hash: &'a str,
+    pub display_name: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredDeviceSession {
+    pub id: String,
+    pub user_id: String,
+    pub label: Option<String>,
+    pub created_at_ms: i64,
+    pub last_seen_at_ms: i64,
+    pub revoked_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NewDeviceSession<'a> {
+    pub id: &'a str,
+    pub user_id: &'a str,
+    pub token_hash: &'a str,
+    pub label: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredAccessToken {
+    pub id: String,
+    pub user_id: String,
+    pub name: String,
+    pub created_at_ms: i64,
+    pub last_used_at_ms: Option<i64>,
+    pub revoked_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NewAccessToken<'a> {
+    pub id: &'a str,
+    pub user_id: &'a str,
+    pub name: &'a str,
+    pub token_hash: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthCredentialKind {
+    DeviceSession,
+    AccessToken,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredAuthCredential {
+    pub user: StoredUser,
+    pub credential_id: String,
+    pub credential_kind: AuthCredentialKind,
+}
+
 pub fn source_hash(session: &Session) -> Result<String> {
     let json = serde_json::to_string(session).context("failed to encode session for hashing")?;
     Ok(format!("{:016x}", fnv1a64(json.as_bytes())))
+}
+
+pub fn hash_password(password: &str) -> Result<String> {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|err| anyhow::anyhow!("failed to hash password: {err}"))
+}
+
+pub fn verify_password(password: &str, password_hash: &str) -> bool {
+    let Ok(parsed) = PasswordHash::new(password_hash) else {
+        return false;
+    };
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok()
+}
+
+pub fn generate_token(prefix: &str) -> String {
+    let secret = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(48)
+        .map(char::from)
+        .collect::<String>();
+    format!("{prefix}_{secret}")
+}
+
+pub fn generate_id(prefix: &str) -> String {
+    let secret = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(20)
+        .map(char::from)
+        .collect::<String>();
+    format!("{prefix}_{secret}")
+}
+
+pub fn token_hash(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
+pub fn normalize_email(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
+}
+
+fn stored_user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredUser> {
+    Ok(StoredUser {
+        id: row.get(0)?,
+        email: row.get(1)?,
+        display_name: row.get(2)?,
+        created_at_ms: row.get(3)?,
+        updated_at_ms: row.get(4)?,
+    })
+}
+
+fn stored_user_with_password_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredUserWithPassword> {
+    Ok(StoredUserWithPassword {
+        user: StoredUser {
+            id: row.get(0)?,
+            email: row.get(1)?,
+            display_name: row.get(3)?,
+            created_at_ms: row.get(4)?,
+            updated_at_ms: row.get(5)?,
+        },
+        password_hash: row.get(2)?,
+    })
+}
+
+fn stored_device_session_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredDeviceSession> {
+    Ok(StoredDeviceSession {
+        id: row.get(0)?,
+        user_id: row.get(1)?,
+        label: row.get(2)?,
+        created_at_ms: row.get(3)?,
+        last_seen_at_ms: row.get(4)?,
+        revoked_at_ms: row.get(5)?,
+    })
+}
+
+fn stored_access_token_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredAccessToken> {
+    Ok(StoredAccessToken {
+        id: row.get(0)?,
+        user_id: row.get(1)?,
+        name: row.get(2)?,
+        created_at_ms: row.get(3)?,
+        last_used_at_ms: row.get(4)?,
+        revoked_at_ms: row.get(5)?,
+    })
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -426,6 +1004,155 @@ mod tests {
             .summary_for("local", "codex", "one", "different", "ai:v1")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn auth_schema_migrates_with_user_version() {
+        let store = DerivedStore::open_in_memory().unwrap();
+
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let auth_tables: usize = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'auth_%'",
+                [],
+                |row| {
+                    let count: i64 = row.get(0)?;
+                    Ok(count as usize)
+                },
+            )
+            .unwrap();
+
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(auth_tables, 3);
+    }
+
+    #[test]
+    fn password_hashes_verify_without_storing_plaintext() {
+        let password_hash = hash_password("correct horse battery staple").unwrap();
+
+        assert_ne!(password_hash, "correct horse battery staple");
+        assert!(password_hash.starts_with("$argon2"));
+        assert!(verify_password(
+            "correct horse battery staple",
+            &password_hash
+        ));
+        assert!(!verify_password("wrong", &password_hash));
+    }
+
+    #[test]
+    fn auth_users_normalize_email_and_enforce_unique_key() {
+        let store = DerivedStore::open_in_memory().unwrap();
+        let password_hash = hash_password("password").unwrap();
+
+        let user = store
+            .create_user(NewUser {
+                id: "usr_1",
+                email: " USER@Example.COM ",
+                password_hash: &password_hash,
+                display_name: Some("User"),
+            })
+            .unwrap();
+        let duplicate = store.create_user(NewUser {
+            id: "usr_2",
+            email: "user@example.com",
+            password_hash: &password_hash,
+            display_name: None,
+        });
+
+        assert_eq!(user.email, "user@example.com");
+        assert!(duplicate.is_err());
+        assert_eq!(store.user_count().unwrap(), 1);
+        assert_eq!(
+            store
+                .user_by_email(" user@example.com ")
+                .unwrap()
+                .unwrap()
+                .user
+                .id,
+            "usr_1"
+        );
+    }
+
+    #[test]
+    fn device_sessions_store_hashes_and_revoke() {
+        let store = auth_store_with_user();
+        let token = generate_token("coca_sess");
+        let hash = token_hash(&token);
+        let session = store
+            .create_device_session(NewDeviceSession {
+                id: "dev_1",
+                user_id: "usr_1",
+                token_hash: &hash,
+                label: Some("Browser"),
+            })
+            .unwrap();
+
+        let valid = store
+            .validate_device_session(&token_hash(&token))
+            .unwrap()
+            .unwrap();
+        let rows = store.list_device_sessions("usr_1").unwrap();
+        assert_eq!(session.id, "dev_1");
+        assert_eq!(valid.credential_kind, AuthCredentialKind::DeviceSession);
+        assert_eq!(valid.user.email, "user@example.com");
+        assert_eq!(rows.len(), 1);
+        assert!(!format!("{rows:?}").contains(&token));
+
+        assert!(store.revoke_device_session("usr_1", "dev_1").unwrap());
+        assert!(store
+            .validate_device_session(&token_hash(&token))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn access_tokens_store_hashes_and_revoke() {
+        let store = auth_store_with_user();
+        let token = generate_token("coca_pat");
+        let hash = token_hash(&token);
+        let access = store
+            .create_access_token(NewAccessToken {
+                id: "tok_1",
+                user_id: "usr_1",
+                name: "CI",
+                token_hash: &hash,
+            })
+            .unwrap();
+
+        let valid = store
+            .validate_access_token(&token_hash(&token))
+            .unwrap()
+            .unwrap();
+        let rows = store.list_access_tokens("usr_1").unwrap();
+        assert_eq!(access.id, "tok_1");
+        assert_eq!(valid.credential_kind, AuthCredentialKind::AccessToken);
+        assert_eq!(valid.user.id, "usr_1");
+        assert_eq!(rows[0].name, "CI");
+        assert!(!format!("{rows:?}").contains(&token));
+
+        assert!(store.revoke_access_token("usr_1", "tok_1").unwrap());
+        assert!(store
+            .validate_access_token(&token_hash(&token))
+            .unwrap()
+            .is_none());
+    }
+
+    fn auth_store_with_user() -> DerivedStore {
+        let store = DerivedStore::open_in_memory().unwrap();
+        let password_hash = hash_password("password").unwrap();
+        store
+            .create_user(NewUser {
+                id: "usr_1",
+                email: "user@example.com",
+                password_hash: &password_hash,
+                display_name: Some("User"),
+            })
+            .unwrap();
+        store
     }
 
     fn session(id: &str) -> Session {
