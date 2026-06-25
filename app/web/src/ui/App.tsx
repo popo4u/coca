@@ -63,9 +63,10 @@ type View =
   | { name: "sessions" }
   | { name: "origins" }
   | { name: "terminals" }
+  | { name: "terminalLive"; ref: SessionRef; terminalId: string }
   | { name: "profile" }
   | { name: "settings" }
-  | { name: "detail"; ref: SessionRef; terminalId?: string | null };
+  | { name: "detail"; ref: SessionRef };
 
 type LoadState<T> =
   | { status: "idle" }
@@ -174,7 +175,7 @@ export function App() {
           client={client}
           terminalToken={terminalToken}
           onTerminalTokenChange={setTerminalToken}
-          onOpenSession={(ref, terminalId) => navigateToDetail(ref, terminalId)}
+          onOpenSession={navigateToTerminal}
         />
       )}
       {view.name === "profile" && (
@@ -203,7 +204,16 @@ export function App() {
           terminalToken={terminalToken}
           onTerminalTokenChange={setTerminalToken}
           reference={view.ref}
-          initialTerminalId={view.terminalId ?? null}
+        />
+      )}
+      {view.name === "terminalLive" && (
+        <TerminalLiveView
+          client={client}
+          readToken={token}
+          terminalToken={terminalToken}
+          onTerminalTokenChange={setTerminalToken}
+          reference={view.ref}
+          terminalId={view.terminalId}
         />
       )}
     </Shell>
@@ -213,10 +223,14 @@ export function App() {
     navigateToDetail({ origin: session.origin, provider: session.provider, id: session.id });
   }
 
-  function navigateToDetail(ref: SessionRef, terminalId: string | null = null) {
-    const attach = terminalId ? `?terminal=${encodePart(terminalId)}` : "";
-    window.location.hash = `session/${encodePart(ref.origin)}/${encodePart(ref.provider)}/${encodePart(ref.id)}${attach}`;
-    setView({ name: "detail", ref, terminalId });
+  function navigateToDetail(ref: SessionRef) {
+    window.location.hash = `session/${encodePart(ref.origin)}/${encodePart(ref.provider)}/${encodePart(ref.id)}`;
+    setView({ name: "detail", ref });
+  }
+
+  function navigateToTerminal(ref: SessionRef, terminalId: string) {
+    window.location.hash = terminalLiveHash(ref, terminalId);
+    setView({ name: "terminalLive", ref, terminalId });
   }
 
   function updateAccountUser(user: AccountUser) {
@@ -344,7 +358,7 @@ function DashboardView({ client, terminalToken, onOpen }: { client: ApiClient; t
             <div className="list-row terminal-mini" key={terminal.terminal_id}>
               <span className="truncate"><b className="mono">{terminal.terminal_id}</b><span className="small muted">{terminal.session.provider} / {terminal.session.origin}</span></span>
               <StatusBadge label={terminal.state.toLowerCase()} tone={terminalTone(terminal.state)} />
-              <a className="btn small-btn" href={`#/session/${encodePart(terminal.session.origin)}/${encodePart(terminal.session.provider)}/${encodePart(terminal.session.id)}?terminal=${encodePart(terminal.terminal_id)}`}>Attach</a>
+              <a className="btn small-btn" href={terminalLiveHash(terminal.session, terminal.terminal_id)}>Attach</a>
             </div>
           ))}
         </div>
@@ -471,15 +485,13 @@ function DetailView({
   readToken,
   terminalToken,
   onTerminalTokenChange,
-  reference,
-  initialTerminalId
+  reference
 }: {
   client: ApiClient;
   readToken: string;
   terminalToken: string;
   onTerminalTokenChange: (token: string) => void;
   reference: SessionRef;
-  initialTerminalId: string | null;
 }) {
   const [state, setState] = useState<LoadState<SessionDetail>>({ status: "loading" });
   const [share, setShare] = useState("");
@@ -525,7 +537,6 @@ function DetailView({
         onTerminalTokenChange={onTerminalTokenChange}
         session={summary}
         reference={reference}
-        initialAttachId={initialTerminalId}
       />
       <div className="detail-layout">
         <section className="transcript-shell" aria-label="Transcript">
@@ -560,6 +571,96 @@ function DetailView({
           </Module>
           <Module title="Share / Read-only Scope" icon={<ShieldCheck size={16} />}>
             <p className="muted">Shared views include transcript, metadata, and provenance. They do not include terminal write tokens.</p>
+          </Module>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+function TerminalLiveView({
+  client,
+  readToken,
+  terminalToken,
+  onTerminalTokenChange,
+  reference,
+  terminalId
+}: {
+  client: ApiClient;
+  readToken: string;
+  terminalToken: string;
+  onTerminalTokenChange: (token: string) => void;
+  reference: SessionRef;
+  terminalId: string;
+}) {
+  const [state, setState] = useState<LoadState<SessionDetail>>({ status: "loading" });
+  const [runtimeState, setRuntimeState] = useState("opening terminal stream");
+
+  useEffect(() => {
+    setState({ status: "loading" });
+    client.session(reference).then((data) => setState({ status: "ready", data })).catch((error: Error) => setState({ status: "error", error: error.message }));
+  }, [client, reference.origin, reference.provider, reference.id]);
+
+  if (state.status === "loading" || state.status === "idle") return <Loading title="Terminal Runtime" />;
+  if (state.status === "error") return <ErrorPanel title="Terminal Runtime" error={state.error} />;
+  if (state.status !== "ready") return <Loading title="Terminal Runtime" />;
+
+  const { summary, transcript } = state.data;
+  const transcriptHref = `#/session/${encodePart(reference.origin)}/${encodePart(reference.provider)}/${encodePart(reference.id)}`;
+
+  return (
+    <div className="terminal-workspace">
+      <header className="terminal-live-header">
+        <div className="terminal-live-title truncate">
+          <span className="eyebrow">daemon runtime</span>
+          <h2 title={summary.title}>{summary.title}</h2>
+          <div className="badge-row">
+            <ProviderBadge provider={summary.provider} />
+            <OriginBadge origin={summary.origin} />
+            <StatusBadge label={runtimeState} tone={runtimeState === "attached" ? "success" : runtimeState === "attach failed" ? "error" : "warning"} />
+            <span className="tag mono">{terminalId}</span>
+          </div>
+        </div>
+        <div className="terminal-live-actions">
+          <a className="btn small-btn" href={transcriptHref}><FileText size={14} /> Transcript</a>
+          <a className="btn small-btn" href="#/terminals"><TerminalSquare size={14} /> Registry</a>
+        </div>
+      </header>
+      <div className="terminal-live-main">
+        <TerminalPanel
+          client={client}
+          readToken={readToken}
+          terminalToken={terminalToken}
+          onTerminalTokenChange={onTerminalTokenChange}
+          session={summary}
+          reference={reference}
+          initialAttachId={terminalId}
+          variant="live"
+          onAttachReady={() => setRuntimeState("attached")}
+          onAttachError={() => setRuntimeState("attach failed")}
+          onDetach={() => setRuntimeState("detached")}
+        />
+        <aside className="terminal-side" aria-label="Terminal context">
+          <Module title="Runtime Scope" icon={<Workflow size={16} />}>
+            <div className="provenance-strip"><span>Browser</span><b>&gt;</b><span>Gateway</span><b>&gt;</b><span>Daemon</span></div>
+            <p className="muted">This page is a live view of a daemon-owned terminal. The browser holds no lifecycle authority.</p>
+          </Module>
+          <Module title="Session" icon={<Database size={16} />}>
+            <dl className="meta-grid">
+              <dt>Terminal</dt><dd className="mono truncate">{terminalId}</dd>
+              <dt>Session id</dt><dd className="mono truncate">{summary.id}</dd>
+              <dt>Provider</dt><dd>{summary.provider}</dd>
+              <dt>Origin</dt><dd>{summary.origin}</dd>
+              <dt>cwd</dt><dd className="mono truncate">{summary.cwd}</dd>
+              <dt>Messages</dt><dd>{transcript.length}</dd>
+            </dl>
+          </Module>
+          <Module title="Readiness" icon={<TerminalSquare size={16} />} action={<TerminalCapabilityBadge session={summary} />}>
+            <Notice
+              tone={summary.terminal.enabled ? "success" : "warning"}
+              title={terminalReadiness(summary)}
+              body={summary.terminal.unavailable_message ?? "Attach, detach, resize, input, and kill requests are sent through the gateway WebSocket to the daemon."}
+            />
           </Module>
         </aside>
       </div>
@@ -1172,6 +1273,10 @@ function sessionKey(session: SessionSummary) {
   return `${session.origin}:${session.provider}:${session.id}`;
 }
 
+function terminalLiveHash(ref: SessionRef, terminalId: string) {
+  return `#/terminal/${encodePart(ref.origin)}/${encodePart(ref.provider)}/${encodePart(ref.id)}/${encodePart(terminalId)}`;
+}
+
 function terminalReadiness(session: SessionSummary) {
   if (session.terminal.enabled) return "terminal ready";
   return session.terminal.unavailable_code ? optionLabel(session.terminal.unavailable_code.replaceAll("_", " ")) : "browse only";
@@ -1194,6 +1299,8 @@ function pageCopy(view: View) {
       return { title: "Origins", subtitle: "Configured remotes visible to this gateway" };
     case "terminals":
       return { title: "Active Terminals", subtitle: "Daemon-owned runtime objects" };
+    case "terminalLive":
+      return { title: "Terminal Runtime", subtitle: "Live daemon stream" };
     case "profile":
       return { title: "Profile", subtitle: "Developer identity, account security, and access tokens" };
     case "settings":
@@ -1205,6 +1312,7 @@ function pageCopy(view: View) {
 
 function isNavActive(view: View, name: View["name"]) {
   if (name === "sessions" && view.name === "detail") return true;
+  if (name === "terminals" && view.name === "terminalLive") return true;
   return view.name === name;
 }
 
@@ -1241,16 +1349,31 @@ function routeFromHash(): View {
   if (hash === "profile") return { name: "profile" };
   if (hash === "settings" || hash === "config") return { name: "settings" };
   const parts = hash.split("/");
-  if (parts[0] === "session" && parts.length === 4) {
-    const params = new URLSearchParams(query);
+  if (parts[0] === "terminal" && parts.length === 5) {
     return {
-      name: "detail",
+      name: "terminalLive",
       ref: {
         origin: decodeURIComponent(parts[1]),
         provider: decodeURIComponent(parts[2]),
         id: decodeURIComponent(parts[3])
       },
-      terminalId: params.get("terminal")
+      terminalId: decodeURIComponent(parts[4])
+    };
+  }
+  if (parts[0] === "session" && parts.length === 4) {
+    const params = new URLSearchParams(query);
+    const terminalId = params.get("terminal");
+    const ref = {
+      origin: decodeURIComponent(parts[1]),
+      provider: decodeURIComponent(parts[2]),
+      id: decodeURIComponent(parts[3])
+    };
+    if (terminalId) {
+      return { name: "terminalLive", ref, terminalId };
+    }
+    return {
+      name: "detail",
+      ref
     };
   }
   return { name: "dashboard" };

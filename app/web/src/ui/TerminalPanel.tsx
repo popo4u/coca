@@ -47,7 +47,11 @@ export function TerminalPanel({
   onTerminalTokenChange,
   session,
   reference,
-  initialAttachId = null
+  initialAttachId = null,
+  variant = "detail",
+  onAttachReady,
+  onAttachError,
+  onDetach
 }: {
   client: ApiClient;
   readToken: string;
@@ -56,6 +60,10 @@ export function TerminalPanel({
   session: SessionSummary;
   reference: SessionRef;
   initialAttachId?: string | null;
+  variant?: "detail" | "live";
+  onAttachReady?: (terminal: TerminalSessionSummary) => void;
+  onAttachError?: (message: string) => void;
+  onDetach?: () => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -79,6 +87,7 @@ export function TerminalPanel({
   const canResume = session.terminal.enabled && session.terminal.can_resume;
   const canFork = session.terminal.enabled && session.terminal.can_fork;
   const unavailableMessage = session.terminal.unavailable_message ?? "Terminal access is unavailable for this session.";
+  const isLive = variant === "live";
 
   useEffect(() => {
     activeTerminalIdRef.current = activeTerminalId;
@@ -150,6 +159,7 @@ export function TerminalPanel({
       lastSeqRef.current = summary.last_seq;
       rememberTerminal(summary);
       setRecentTerminals(readRecentTerminals());
+      onAttachReady?.(summary);
       return;
     }
     if (frame.event === "terminal.output") {
@@ -171,10 +181,11 @@ export function TerminalPanel({
     const message = formatDisplayError(error);
     setConnectionStatus("error");
     setStatusMessage(message);
+    onAttachError?.(message);
     terminalRef.current?.writeln("");
     terminalRef.current?.writeln(`[coca] ${message}`);
     if (error.detail) terminalRef.current?.writeln(`[coca] detail: ${error.detail}`);
-  }, [refreshTerminals]);
+  }, [onAttachError, onAttachReady, refreshTerminals]);
 
   const connectWithFrame = useCallback((frame: TerminalClientFrame, clear = false) => {
     if (!terminalToken) {
@@ -300,6 +311,7 @@ export function TerminalPanel({
     setActiveTerminalId(null);
     setStatusMessage(terminalId ? `detached from ${terminalId}` : "No terminal attached.");
     refreshTerminals();
+    onDetach?.();
   }
 
   function killTerminal() {
@@ -334,11 +346,11 @@ export function TerminalPanel({
   }
 
   return (
-    <section className={`terminal-panel ${maximized ? "maximized" : ""}`} aria-label="Terminal">
+    <section className={`terminal-panel ${isLive ? "live" : "detail"} ${maximized ? "maximized" : ""}`} aria-label="Terminal">
       <header className="section-head terminal-head">
         <div>
           <p>terminal</p>
-          <h2>Runtime session</h2>
+          <h2>{isLive ? "Terminal Runtime" : "Runtime session"}</h2>
         </div>
         <div className="terminal-status-strip">
           <span className={`terminal-state ${connectionStatus}`}>{connectionStatus}</span>
@@ -349,28 +361,30 @@ export function TerminalPanel({
         </div>
       </header>
 
-      <div className="terminal-access">
-        <div>
-          <strong>Terminal token</strong>
-          <span>{terminalToken ? "saved for this browser" : "required for Resume, Fork, Attach, Detach, and Kill"}</span>
+      {!isLive && (
+        <div className="terminal-access">
+          <div>
+            <strong>Terminal token</strong>
+            <span>{terminalToken ? "saved for this browser" : "required for Resume, Fork, Attach, Detach, and Kill"}</span>
+          </div>
+          {terminalToken ? (
+            <button className="icon-line secondary" type="button" onClick={clearSavedTerminalToken}>
+              <Trash2 size={16} />Clear token
+            </button>
+          ) : (
+            <form className="terminal-token-form" onSubmit={submitTerminalToken}>
+              <input
+                type="password"
+                value={draftToken}
+                onChange={(event) => setDraftToken(event.target.value)}
+                placeholder="Terminal token"
+                aria-label="Terminal token"
+              />
+              <button className="icon-line" type="submit"><KeyRound size={16} />Save</button>
+            </form>
+          )}
         </div>
-        {terminalToken ? (
-          <button className="icon-line secondary" type="button" onClick={clearSavedTerminalToken}>
-            <Trash2 size={16} />Clear token
-          </button>
-        ) : (
-          <form className="terminal-token-form" onSubmit={submitTerminalToken}>
-            <input
-              type="password"
-              value={draftToken}
-              onChange={(event) => setDraftToken(event.target.value)}
-              placeholder="Terminal token"
-              aria-label="Terminal token"
-            />
-            <button className="icon-line" type="submit"><KeyRound size={16} />Save</button>
-          </form>
-        )}
-      </div>
+      )}
 
       {!session.terminal.enabled && (
         <div className="notice terminal-notice">
@@ -380,12 +394,16 @@ export function TerminalPanel({
       )}
 
       <div className="terminal-action-grid">
-        <button className="icon-line" type="button" disabled={!canResume || !canOpenTerminal} title={!canResume ? unavailableMessage : undefined} onClick={() => openTerminal("Resume")}>
-          <RotateCw size={16} />Resume
-        </button>
-        <button className="icon-line" type="button" disabled={!canFork || !canOpenTerminal} title={!canFork ? unavailableMessage : undefined} onClick={() => openTerminal("Fork")}>
-          <GitFork size={16} />Fork
-        </button>
+        {!isLive && (
+          <>
+            <button className="icon-line" type="button" disabled={!canResume || !canOpenTerminal} title={!canResume ? unavailableMessage : undefined} onClick={() => openTerminal("Resume")}>
+              <RotateCw size={16} />Resume
+            </button>
+            <button className="icon-line" type="button" disabled={!canFork || !canOpenTerminal} title={!canFork ? unavailableMessage : undefined} onClick={() => openTerminal("Fork")}>
+              <GitFork size={16} />Fork
+            </button>
+          </>
+        )}
         <button className="icon-line secondary" type="button" disabled={!activeTerminalId} onClick={detachTerminal}>
           <Unplug size={16} />Detach
         </button>
@@ -395,28 +413,30 @@ export function TerminalPanel({
       </div>
 
       <div className="terminal-layout">
-        <div className="terminal-sidebar">
-          <div className="terminal-list-head">
-            <strong>Running terminals</strong>
-            <button className="icon-button" type="button" onClick={refreshTerminals} disabled={!terminalToken} aria-label="Refresh terminal sessions">
-              <RefreshCw size={15} />
-            </button>
+        {!isLive && (
+          <div className="terminal-sidebar">
+            <div className="terminal-list-head">
+              <strong>Running terminals</strong>
+              <button className="icon-button" type="button" onClick={refreshTerminals} disabled={!terminalToken} aria-label="Refresh terminal sessions">
+                <RefreshCw size={15} />
+              </button>
+            </div>
+            {listState.status === "error" && (
+              <TerminalErrorMessage error={listState.error} />
+            )}
+            {listState.status === "loading" && <p className="terminal-list-message">Loading terminal sessions...</p>}
+            {!terminalToken && <p className="terminal-list-message">Save a terminal token to load and attach sessions.</p>}
+            <TerminalList title="This session" terminals={relatedTerminals} activeTerminalId={connectionStatus === "open" ? activeTerminalId : null} onAttach={attachTerminal} />
+            <TerminalList title="Other sessions" terminals={otherTerminals} activeTerminalId={connectionStatus === "open" ? activeTerminalId : null} onAttach={attachTerminal} />
+            <form className="manual-attach" onSubmit={(event) => {
+              event.preventDefault();
+              attachTerminal(manualTerminalId);
+            }}>
+              <input value={manualTerminalId} onChange={(event) => setManualTerminalId(event.target.value)} placeholder="terminal_id" aria-label="Terminal id" />
+              <button className="icon-line" type="submit" disabled={!terminalToken || !manualTerminalId.trim()}><Plug size={16} />Attach</button>
+            </form>
           </div>
-          {listState.status === "error" && (
-            <TerminalErrorMessage error={listState.error} />
-          )}
-          {listState.status === "loading" && <p className="terminal-list-message">Loading terminal sessions...</p>}
-          {!terminalToken && <p className="terminal-list-message">Save a terminal token to load and attach sessions.</p>}
-          <TerminalList title="This session" terminals={relatedTerminals} activeTerminalId={connectionStatus === "open" ? activeTerminalId : null} onAttach={attachTerminal} />
-          <TerminalList title="Other sessions" terminals={otherTerminals} activeTerminalId={connectionStatus === "open" ? activeTerminalId : null} onAttach={attachTerminal} />
-          <form className="manual-attach" onSubmit={(event) => {
-            event.preventDefault();
-            attachTerminal(manualTerminalId);
-          }}>
-            <input value={manualTerminalId} onChange={(event) => setManualTerminalId(event.target.value)} placeholder="terminal_id" aria-label="Terminal id" />
-            <button className="icon-line" type="submit" disabled={!terminalToken || !manualTerminalId.trim()}><Plug size={16} />Attach</button>
-          </form>
-        </div>
+        )}
         <div className="terminal-surface-wrap">
           <div className="terminal-toolbar">
             <span><TerminalSquare size={15} />{activeTerminalId ?? "no terminal"}</span>
