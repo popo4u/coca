@@ -52,21 +52,48 @@ opened with `,`. `--remote-config` remains available as a remotes-only
 override, and an existing `~/.config/coca/remotes.json` is still read when
 `settings.json` does not exist.
 
-Run the local daemon:
+Recommended local service management:
+
+```sh
+cargo xtask run
+cargo xtask dev status
+cargo xtask dev logs
+cargo xtask dev stop
+```
+
+`cargo xtask run` builds the native debug binary for the current OS, stops old
+managed services, and starts the local daemon, gateway, and Vite dev server. It
+stores PID files and logs under `.ai/run/xtask-dev/`, binds HTTP services on
+`0.0.0.0`, and prints local URLs such as `http://127.0.0.1:5173`. By default it
+uses port `8787` for the gateway and `5173` for Vite. If either port is occupied
+by a non-coca process, use smart-port mode:
+
+```sh
+cargo xtask run --smart-port
+```
+
+Use release mode when you want to exercise the built binary and static Web
+assets:
+
+```sh
+cargo xtask dev restart --mode release
+```
+
+Manual daemon startup is still useful for focused debugging:
 
 ```sh
 cargo run -- daemon
 cargo run -- daemon --socket ~/.config/coca/daemon.sock
 ```
 
-Build and run the React Web frontend through the browser gateway:
+Build and run the React Web frontend through the browser gateway manually:
 
 ```sh
 cd app/web
 npm install
 npm run build
 cd ../..
-cargo run -- gateway --bind 127.0.0.1:8787
+cargo run -- gateway --bind 0.0.0.0:8787
 ```
 
 Open the Web frontend and enter `share.token`, or pass it once as a query token:
