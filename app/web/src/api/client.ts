@@ -1,6 +1,7 @@
 import type {
   AccountDevicesResponse,
   AccountMe,
+  AccountShareLinksResponse,
   AccountTokenCreateResponse,
   AccountTokensResponse,
   AuthCapabilities,
@@ -13,6 +14,7 @@ import type {
   HealthResponse,
   PasswordUpdate,
   ProfileUpdate,
+  PublicShareResponse,
   SessionDetail,
   SessionRef,
   SessionsResponse,
@@ -23,54 +25,29 @@ import type {
 } from "./types";
 
 const tokenKey = "coca-web-token";
-const terminalTokenKey = "coca-web-terminal-token";
 
 export function readToken(): string {
-  const params = new URLSearchParams(window.location.search);
-  const token = params.get("token");
-  if (token) {
-    window.localStorage.setItem(tokenKey, token);
-    params.delete("token");
-    const next = `${window.location.pathname}${params.toString() ? `?${params}` : ""}${window.location.hash}`;
-    window.history.replaceState(null, "", next);
-    return token;
-  }
-  return window.localStorage.getItem(tokenKey) ?? "";
+  return window.localStorage.getItem(tokenKey) ?? window.sessionStorage.getItem(tokenKey) ?? "";
 }
 
-export function saveToken(token: string) {
-  window.localStorage.setItem(tokenKey, token);
+export function saveToken(token: string, remember = true) {
+  if (remember) {
+    window.localStorage.setItem(tokenKey, token);
+    window.sessionStorage.removeItem(tokenKey);
+  } else {
+    window.sessionStorage.setItem(tokenKey, token);
+    window.localStorage.removeItem(tokenKey);
+  }
 }
 
 export function clearToken() {
   window.localStorage.removeItem(tokenKey);
+  window.sessionStorage.removeItem(tokenKey);
 }
 
-export function readTerminalToken(): string {
-  const params = new URLSearchParams(window.location.search);
-  const token = params.get("terminal_token");
-  if (token) {
-    window.localStorage.setItem(terminalTokenKey, token);
-    params.delete("terminal_token");
-    const next = `${window.location.pathname}${params.toString() ? `?${params}` : ""}${window.location.hash}`;
-    window.history.replaceState(null, "", next);
-    return token;
-  }
-  return window.localStorage.getItem(terminalTokenKey) ?? "";
-}
-
-export function saveTerminalToken(token: string) {
-  window.localStorage.setItem(terminalTokenKey, token);
-}
-
-export function clearTerminalToken() {
-  window.localStorage.removeItem(terminalTokenKey);
-}
-
-export function openTerminalSocket(readToken: string, terminalToken: string): WebSocket {
+export function openTerminalSocket(accountToken: string): WebSocket {
   const params = new URLSearchParams({
-    token: readToken,
-    terminal_token: terminalToken
+    token: accountToken
   });
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return new WebSocket(`${protocol}//${window.location.host}/api/v1/terminal/ws?${params}`);
@@ -127,12 +104,20 @@ export class ApiClient {
     return this.get<AccountTokensResponse>("/api/v1/account/tokens");
   }
 
-  createAccountToken(name: string) {
-    return this.post<AccountTokenCreateResponse>("/api/v1/account/tokens", { name });
+  createAccountToken(name: string, scopes: string[]) {
+    return this.post<AccountTokenCreateResponse>("/api/v1/account/tokens", { name, scopes });
   }
 
   revokeAccountToken(tokenId: string) {
     return this.post<Record<string, never>>("/api/v1/account/tokens/revoke", { token_id: tokenId });
+  }
+
+  accountShareLinks() {
+    return this.get<AccountShareLinksResponse>("/api/v1/account/share-links");
+  }
+
+  revokeShareLink(linkId: string) {
+    return this.post<Record<string, never>>("/api/v1/account/share-links/revoke", { link_id: linkId });
   }
 
   sessions() {
@@ -156,10 +141,12 @@ export class ApiClient {
     return this.post<ShareLink>("/api/v1/share-session", { session });
   }
 
-  terminalSessions(terminalToken: string) {
-    return this.get<TerminalSessionsResponse>("/api/v1/terminal/sessions", {
-      "X-Coca-Terminal-Token": terminalToken
-    });
+  publicShare(linkId: string, shareToken: string) {
+    return this.get<PublicShareResponse>(`/api/v1/share/${encodeURIComponent(linkId)}?share_token=${encodeURIComponent(shareToken)}`);
+  }
+
+  terminalSessions() {
+    return this.get<TerminalSessionsResponse>("/api/v1/terminal/sessions");
   }
 
   private async get<T>(path: string, extraHeaders?: Record<string, string>): Promise<T> {

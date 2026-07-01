@@ -1,12 +1,11 @@
 import { FormEvent, useEffect, useState } from "react";
 import { KeyRound, ShieldCheck, UserRound } from "lucide-react";
 import type { ApiClient } from "../api/client";
-import type { AccountDevice, AccountMe, AccountToken, AccountUser } from "../api/types";
+import type { AccountDevice, AccountMe, AccountShareLink, AccountToken, AccountUser } from "../api/types";
 
 type ProfileViewProps = {
   client: ApiClient;
-  account: AccountMe | null;
-  legacyReason?: string;
+  account: AccountMe;
   onUserChange: (user: AccountUser) => void;
 };
 
@@ -15,15 +14,27 @@ type LoadState<T> =
   | { status: "ready"; data: T }
   | { status: "error"; error: string };
 
-export function ProfileView({ client, account, legacyReason, onUserChange }: ProfileViewProps) {
+const accountTokenScopes = [
+  { value: "sessions.read", label: "sessions.read" },
+  { value: "share.manage", label: "share.manage" },
+  { value: "account.manage", label: "account.manage" },
+  { value: "tokens.manage", label: "tokens.manage" },
+  { value: "terminal.read", label: "terminal.read" },
+  { value: "terminal.write", label: "terminal.write" },
+  { value: "terminal.kill", label: "terminal.kill" }
+];
+
+export function ProfileView({ client, account, onUserChange }: ProfileViewProps) {
   const [profileDraft, setProfileDraft] = useState({ displayName: account?.user.display_name ?? "", email: account?.user.email ?? "" });
   const [passwordDraft, setPasswordDraft] = useState({ currentPassword: "", newPassword: "" });
   const [tokenName, setTokenName] = useState("");
+  const [selectedScopes, setSelectedScopes] = useState<string[]>(["sessions.read"]);
   const [profileStatus, setProfileStatus] = useState("");
   const [passwordStatus, setPasswordStatus] = useState("");
   const [tokenStatus, setTokenStatus] = useState("");
   const [createdToken, setCreatedToken] = useState<{ name: string; accessToken: string } | null>(null);
   const [tokens, setTokens] = useState<LoadState<AccountToken[]>>({ status: "loading" });
+  const [shareLinks, setShareLinks] = useState<LoadState<AccountShareLink[]>>({ status: "loading" });
   const [devices, setDevices] = useState<LoadState<AccountDevice[]>>({ status: "loading" });
 
   useEffect(() => {
@@ -31,34 +42,10 @@ export function ProfileView({ client, account, legacyReason, onUserChange }: Pro
   }, [account?.user.display_name, account?.user.email]);
 
   useEffect(() => {
-    if (!account) return;
     refreshTokens();
+    refreshShareLinks();
     refreshDevices();
   }, [account, client]);
-
-  if (!account) {
-    return (
-      <div className="profile-stack">
-        <section className="module">
-          <div className="module-body profile-head">
-            <div className="big-avatar">lg</div>
-            <div>
-              <h2 className="entity-title">Local gateway token</h2>
-              <div className="muted">Account identity is unavailable in legacy token mode.</div>
-              <div className="badge-row"><span className="status-badge warning">legacy auth</span><span className="tag">terminal token separate</span></div>
-            </div>
-          </div>
-        </section>
-        <section className="module">
-          <header className="module-head"><h2 className="module-title"><ShieldCheck size={16} /> Profile unavailable</h2></header>
-          <div className="module-body">
-            <div className="notice warning"><b>Account APIs did not confirm this token.</b><br />{legacyReason || "Use email/password login to manage profile, access tokens, and device sessions."}</div>
-            <p className="muted">The browser remains a gateway API client. Terminal access continues to use the explicit terminal token controls in Active Terminals and session detail.</p>
-          </div>
-        </section>
-      </div>
-    );
-  }
 
   const initials = accountInitials(account.user);
 
@@ -67,6 +54,13 @@ export function ProfileView({ client, account, legacyReason, onUserChange }: Pro
     client.accountTokens()
       .then((data) => setTokens({ status: "ready", data: data.tokens }))
       .catch((error: Error) => setTokens({ status: "error", error: error.message }));
+  }
+
+  function refreshShareLinks() {
+    setShareLinks({ status: "loading" });
+    client.accountShareLinks()
+      .then((data) => setShareLinks({ status: "ready", data: data.links }))
+      .catch((error: Error) => setShareLinks({ status: "error", error: error.message }));
   }
 
   function refreshDevices() {
@@ -107,7 +101,7 @@ export function ProfileView({ client, account, legacyReason, onUserChange }: Pro
     const name = tokenName.trim();
     if (!name) return;
     setTokenStatus("Creating...");
-    client.createAccountToken(name)
+    client.createAccountToken(name, selectedScopes)
       .then((data) => {
         setCreatedToken({ name, accessToken: data.plaintext_token || data.access_token || "" });
         setTokenName("");
@@ -115,6 +109,13 @@ export function ProfileView({ client, account, legacyReason, onUserChange }: Pro
         refreshTokens();
       })
       .catch((error: Error) => setTokenStatus(error.message));
+  }
+
+  function toggleScope(scope: string) {
+    setSelectedScopes((current) => current.includes(scope)
+      ? current.filter((value) => value !== scope)
+      : [...current, scope]
+    );
   }
 
   function revokeToken(token: AccountToken) {
@@ -129,6 +130,15 @@ export function ProfileView({ client, account, legacyReason, onUserChange }: Pro
       .catch((error: Error) => setTokenStatus(error.message));
   }
 
+  function revokeShareLink(link: AccountShareLink) {
+    const id = shareLinkId(link);
+    if (!id) return;
+    setShareLinks({ status: "loading" });
+    client.revokeShareLink(id)
+      .then(refreshShareLinks)
+      .catch((error: Error) => setShareLinks({ status: "error", error: error.message }));
+  }
+
   function revokeDevice(device: AccountDevice) {
     const id = deviceId(device);
     if (!id) return;
@@ -136,6 +146,10 @@ export function ProfileView({ client, account, legacyReason, onUserChange }: Pro
       .then(refreshDevices)
       .catch((error: Error) => setDevices({ status: "error", error: error.message }));
   }
+
+  const tokenCount = tokens.status === "ready" ? tokens.data.length : null;
+  const shareLinkCount = shareLinks.status === "ready" ? shareLinks.data.length : null;
+  const deviceCount = devices.status === "ready" ? devices.data.length : null;
 
   return (
     <div className="profile-stack">
@@ -145,11 +159,25 @@ export function ProfileView({ client, account, legacyReason, onUserChange }: Pro
           <div>
             <h2 className="entity-title">{account.user.display_name || account.user.email}</h2>
             <div className="muted truncate">{account.user.email}{account.user.created_at_ms ? ` · Joined ${formatDate(account.user.created_at_ms)}` : ""}</div>
-            <div className="badge-row"><span className="tag">transcript.read</span><span className="tag">account.manage</span><span className="tag">terminal token separate</span></div>
+            <div className="badge-row"><span className="tag">sessions.read</span><span className="tag">account.manage</span><span className="tag">terminal.write</span></div>
           </div>
           <span className="status-badge success">{account.auth_mode ?? "account"}</span>
         </div>
       </section>
+      <div className="grid-12">
+        <section className="module span-4">
+          <header className="module-head"><h2 className="module-title"><ShieldCheck size={16} /> Access</h2></header>
+          <div className="module-body profile-stat"><strong>{tokenCount ?? "-"}</strong><span>Tokens</span></div>
+        </section>
+        <section className="module span-4">
+          <header className="module-head"><h2 className="module-title"><ShieldCheck size={16} /> Shares</h2></header>
+          <div className="module-body profile-stat"><strong>{shareLinkCount ?? "-"}</strong><span>Links</span></div>
+        </section>
+        <section className="module span-4">
+          <header className="module-head"><h2 className="module-title"><UserRound size={16} /> Devices</h2></header>
+          <div className="module-body profile-stat"><strong>{deviceCount ?? "-"}</strong><span>Sessions</span></div>
+        </section>
+      </div>
       <div className="grid-12">
         <section className="module span-6">
           <header className="module-head"><h2 className="module-title"><UserRound size={16} /> Profile</h2></header>
@@ -177,11 +205,18 @@ export function ProfileView({ client, account, legacyReason, onUserChange }: Pro
           <h2 className="module-title"><ShieldCheck size={16} /> Security / Access</h2>
           <form className="inline-create" onSubmit={createToken}>
             <input value={tokenName} onChange={(event) => setTokenName(event.target.value)} placeholder="Token name" aria-label="Token name" />
-            <button className="btn small-btn" type="submit">Create token</button>
+            <button className="btn small-btn" type="submit" disabled={selectedScopes.length === 0}>Create token</button>
           </form>
         </header>
         <div className="module-body">
-          <div className="notice"><b>Terminal access stays separate.</b><br />Account access tokens authenticate gateway APIs. Terminal write operations still require a terminal token and daemon runtime readiness.</div>
+          <div className="scope-picker" aria-label="Personal access token scopes">
+            {accountTokenScopes.map((scope) => (
+              <label className="check-line compact" key={scope.value}>
+                <input type="checkbox" checked={selectedScopes.includes(scope.value)} onChange={() => toggleScope(scope.value)} />
+                <span>{scope.label}</span>
+              </label>
+            ))}
+          </div>
           {createdToken && (
             <div className="one-time-token">
               <div><b>{createdToken.name}</b><span>Copy this value now. It will not be shown again.</span></div>
@@ -198,7 +233,7 @@ export function ProfileView({ client, account, legacyReason, onUserChange }: Pro
                 return (
                   <div className="token-row" key={tokenId(token) || token.name}>
                     <div className="truncate"><b>{token.name}</b><div className="small muted mono truncate">{tokenPreview(token)}</div></div>
-                    <span className="tag">gateway</span>
+                    <span className="token-scopes">{tokenScopes(token).map((scope) => <span className="tag" key={scope}>{scope}</span>)}</span>
                     <span className="small muted">{lastUsed ? `Last used ${formatDate(lastUsed)}` : "Never used"}</span>
                     <button className="btn danger small-btn" type="button" onClick={() => revokeToken(token)} disabled={!tokenId(token)}>Revoke</button>
                   </div>
@@ -208,6 +243,26 @@ export function ProfileView({ client, account, legacyReason, onUserChange }: Pro
             </div>
           )}
           {tokenStatus && <p className="save-status">{tokenStatus}</p>}
+        </div>
+      </section>
+      <section className="module">
+        <header className="module-head"><h2 className="module-title"><ShieldCheck size={16} /> Share Links</h2></header>
+        <div className="module-body">
+          {shareLinks.status === "loading" && <p className="muted">Loading share links...</p>}
+          {shareLinks.status === "error" && <div className="notice warning"><b>Share link registry unavailable</b><br />{shareLinks.error}</div>}
+          {shareLinks.status === "ready" && (
+            <div className="access-list">
+              {shareLinks.data.map((link) => (
+                <div className="share-link-row" key={shareLinkId(link) || link.url || shareLinkTitle(link)}>
+                  <div className="truncate"><b>{shareLinkTitle(link)}</b><div className="small muted mono truncate">{shareLinkPreview(link)}</div></div>
+                  <span className="small muted">{link.created_at_ms ? `Created ${formatDate(link.created_at_ms)}` : "Created time unavailable"}</span>
+                  <span className="small muted">{link.last_used_at_ms ? `Last used ${formatDate(link.last_used_at_ms)}` : "Never used"}</span>
+                  <button className="btn danger small-btn" type="button" onClick={() => revokeShareLink(link)} disabled={!shareLinkId(link)}>Revoke</button>
+                </div>
+              ))}
+              {shareLinks.data.length === 0 && <p className="muted">No read-only share links have been created.</p>}
+            </div>
+          )}
         </div>
       </section>
       <section className="module">
@@ -251,6 +306,22 @@ function tokenPreview(token: AccountToken) {
   const preview = token.preview ?? token.token_preview;
   if (preview) return preview;
   return token.id ? `tok_...${token.id.slice(-6)}` : "token preview unavailable";
+}
+
+function tokenScopes(token: AccountToken) {
+  return token.scopes && token.scopes.length > 0 ? token.scopes : ["unspecified"];
+}
+
+function shareLinkId(link: AccountShareLink) {
+  return link.id ?? link.link_id ?? link.token_id ?? "";
+}
+
+function shareLinkTitle(link: AccountShareLink) {
+  return link.title || link.session?.id || "Read-only share link";
+}
+
+function shareLinkPreview(link: AccountShareLink) {
+  return link.url ?? link.preview ?? link.token_preview ?? "share link preview unavailable";
 }
 
 function deviceId(device: AccountDevice) {

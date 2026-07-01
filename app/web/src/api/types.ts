@@ -53,11 +53,9 @@ export type ConfigSummary = {
   ai: AiSummary;
   share: {
     base_url: string;
-    token_configured: boolean;
   };
   terminal: {
     enabled: boolean;
-    token_configured: boolean;
     daemon_available: boolean;
     terminal_socket_available: boolean;
     unavailable_code: string | null;
@@ -123,7 +121,6 @@ export type AuthCapabilities = {
     reason?: string | null;
   };
   signup_enabled?: boolean;
-  signup_requires_bootstrap_token?: boolean;
   sso?: Array<{
     provider: string;
     available?: boolean;
@@ -159,6 +156,7 @@ export type AccountToken = {
   id?: string;
   token_id?: string;
   name: string;
+  scopes?: string[];
   preview?: string | null;
   token_preview?: string | null;
   created_at_ms?: number | null;
@@ -184,7 +182,6 @@ export type AuthSignupRequest = {
   email: string;
   password: string;
   display_name?: string;
-  bootstrap_token: string;
   device_label?: string;
 };
 
@@ -218,6 +215,25 @@ export type AccountTokenCreateResponse = {
   access_token?: string;
 };
 
+export type AccountShareLink = {
+  id?: string;
+  link_id?: string;
+  token_id?: string;
+  url?: string;
+  title?: string | null;
+  session?: SessionRef | null;
+  token_preview?: string | null;
+  preview?: string | null;
+  created_at_ms?: number | null;
+  revoked_at_ms?: number | null;
+  last_used_at_ms?: number | null;
+  expires_at_ms?: number | null;
+};
+
+export type AccountShareLinksResponse = {
+  links: AccountShareLink[];
+};
+
 export type SessionRef = {
   origin: string;
   provider: string;
@@ -226,6 +242,14 @@ export type SessionRef = {
 
 export type ShareLink = {
   url: string;
+  id?: string;
+  token_preview?: string | null;
+  expires_at_ms?: number | null;
+};
+
+export type PublicShareResponse = {
+  link?: AccountShareLink;
+  session: SessionDetail;
 };
 
 export type TerminalId = string;

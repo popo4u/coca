@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import {
   Activity,
@@ -7,13 +7,11 @@ import {
   ChevronDown,
   ChevronRight,
   CircleAlert,
-  Clock3,
   Code2,
   Cpu,
   Database,
   Eye,
   FileText,
-  Folder,
   GitBranch,
   KeyRound,
   LayoutDashboard,
@@ -35,12 +33,11 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   ApiClient,
-  clearTerminalToken,
   clearToken,
-  readTerminalToken,
+  openTerminalSocket,
   readToken,
-  saveTerminalToken,
-  saveToken
+  saveToken,
+  sendTerminalFrame
 } from "../api/client";
 import type {
   AccountMe,
@@ -51,12 +48,17 @@ import type {
   SessionRef,
   SessionSummary,
   SessionsResponse,
+  TerminalMode,
+  TerminalServerFrame,
   TerminalSessionSummary,
-  TerminalSessionsResponse
+  TerminalSessionsResponse,
+  TerminalSize
 } from "../api/types";
 import { AuthGate } from "./AuthGate";
 import { ProfileView } from "./ProfileView";
-import { TerminalPanel } from "./TerminalPanel";
+
+const TerminalPanel = lazy(() => import("./TerminalPanel").then((module) => ({ default: module.TerminalPanel })));
+const launcherTerminalSize: TerminalSize = { cols: 100, rows: 28 };
 
 type View =
   | { name: "dashboard" }
@@ -64,6 +66,7 @@ type View =
   | { name: "origins" }
   | { name: "terminals" }
   | { name: "terminalLive"; ref: SessionRef; terminalId: string }
+  | { name: "share"; linkId: string; shareToken: string }
   | { name: "profile" }
   | { name: "settings" }
   | { name: "detail"; ref: SessionRef };
@@ -77,12 +80,17 @@ type LoadState<T> =
 type Theme = "dark" | "light";
 type Accent = "pink" | "klein" | "ubuntu" | "cyberpunk" | "black";
 type Density = "compact" | "normal" | "comfortable";
+type Background = "porcelain" | "paper-gray" | "rose-mist";
+type TerminalTheme = "one-half-dark" | "campbell" | "vintage" | "solarized-dark" | "tango-dark";
+type TranscriptDefault = "rendered" | "raw";
+type LandingPage = "dashboard" | "sessions" | "terminals";
+type TerminalBehavior = "detach-confirm-kill" | "ask-before-detach";
 type TranscriptRole = "user" | "assistant" | "context" | "event";
 type MessageMode = "preview" | "raw";
 type AccountState =
   | { status: "loading" }
   | { status: "account"; data: AccountMe }
-  | { status: "legacy"; error: string };
+  | { status: "error"; error: string };
 
 const accentThemes: Array<{ id: Accent; label: string; swatch: string }> = [
   { id: "pink", label: "Pink", swatch: "#a64f73" },
@@ -90,6 +98,20 @@ const accentThemes: Array<{ id: Accent; label: string; swatch: string }> = [
   { id: "ubuntu", label: "Ubuntu purple", swatch: "#77216f" },
   { id: "cyberpunk", label: "Cyberpunk yellow", swatch: "#c99a00" },
   { id: "black", label: "Black", swatch: "#151515" }
+];
+
+const backgroundOptions: Array<{ id: Background; label: string }> = [
+  { id: "porcelain", label: "Porcelain" },
+  { id: "paper-gray", label: "Paper gray" },
+  { id: "rose-mist", label: "Rose mist" }
+];
+
+const terminalThemes: Array<{ id: TerminalTheme; label: string; swatch: string }> = [
+  { id: "one-half-dark", label: "One Half Dark", swatch: "#282c34" },
+  { id: "campbell", label: "Campbell", swatch: "#0c0c0c" },
+  { id: "vintage", label: "Vintage", swatch: "#000000" },
+  { id: "solarized-dark", label: "Solarized Dark", swatch: "#002b36" },
+  { id: "tango-dark", label: "Tango Dark", swatch: "#171a16" }
 ];
 
 const navItems: Array<{ view: View["name"]; href: string; label: string; icon: ReactNode }> = [
@@ -103,11 +125,15 @@ const navItems: Array<{ view: View["name"]; href: string; label: string; icon: R
 
 export function App() {
   const [token, setToken] = useState(readToken);
-  const [terminalToken, setTerminalToken] = useState(readTerminalToken);
   const [view, setView] = useState<View>(() => routeFromHash());
   const [theme, setTheme] = useState<Theme>(() => readTheme());
   const [accent, setAccent] = useState<Accent>(() => readAccent());
   const [density, setDensity] = useState<Density>(() => readDensity());
+  const [background, setBackground] = useState<Background>(() => readBackground());
+  const [terminalTheme, setTerminalTheme] = useState<TerminalTheme>(() => readTerminalTheme());
+  const [transcriptDefault, setTranscriptDefault] = useState<TranscriptDefault>(() => readTranscriptDefault());
+  const [landingPage, setLandingPage] = useState<LandingPage>(() => readLandingPage());
+  const [terminalBehavior, setTerminalBehavior] = useState<TerminalBehavior>(() => readTerminalBehavior());
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [accountState, setAccountState] = useState<AccountState>({ status: "loading" });
   const client = useMemo(() => new ApiClient(token), [token]);
@@ -116,10 +142,19 @@ export function App() {
     document.documentElement.dataset.theme = theme;
     document.documentElement.dataset.accent = accent;
     document.documentElement.dataset.density = density;
+    document.documentElement.dataset.background = background;
     window.localStorage.setItem("coca-web-theme", theme);
     window.localStorage.setItem("coca-web-accent", accent);
     window.localStorage.setItem("coca-web-density", density);
-  }, [theme, accent, density]);
+    window.localStorage.setItem("coca-web-background", background);
+  }, [theme, accent, density, background]);
+
+  useEffect(() => {
+    window.localStorage.setItem("coca-web-terminal-theme", terminalTheme);
+    window.localStorage.setItem("coca-web-transcript-default", transcriptDefault);
+    window.localStorage.setItem("coca-web-landing-page", landingPage);
+    window.localStorage.setItem("coca-web-terminal-behavior", terminalBehavior);
+  }, [terminalTheme, transcriptDefault, landingPage, terminalBehavior]);
 
   useEffect(() => {
     const onHash = () => {
@@ -135,13 +170,20 @@ export function App() {
       setAccountState({ status: "loading" });
       return;
     }
-    setAccountState({ status: "legacy", error: "Account APIs are not available in this gateway build." });
-  }, [token]);
+    setAccountState({ status: "loading" });
+    client.accountMe()
+      .then((data) => setAccountState({ status: "account", data }))
+      .catch((error: Error) => setAccountState({ status: "error", error: error.message }));
+  }, [client, token]);
+
+  if (view.name === "share") {
+    return <PublicShareView linkId={view.linkId} shareToken={view.shareToken} />;
+  }
 
   if (!token) {
     return (
-      <AuthGate onAuthenticated={(value) => {
-        saveToken(value);
+      <AuthGate onAuthenticated={(value, remember) => {
+        saveToken(value, remember);
         setToken(value);
       }} />
     );
@@ -162,29 +204,22 @@ export function App() {
           client.logout().catch(() => undefined);
         }
         clearToken();
-        clearTerminalToken();
         setToken("");
-        setTerminalToken("");
       }}
     >
-      {view.name === "dashboard" && <DashboardView client={client} terminalToken={terminalToken} onOpen={openDetail} />}
+      {view.name === "dashboard" && <DashboardView client={client} onOpen={openDetail} />}
       {view.name === "sessions" && <SessionsView client={client} onOpen={openDetail} />}
       {view.name === "origins" && <OriginsView client={client} />}
       {view.name === "terminals" && (
         <TerminalsView
           client={client}
-          terminalToken={terminalToken}
-          onTerminalTokenChange={setTerminalToken}
           onOpenSession={navigateToTerminal}
         />
       )}
       {view.name === "profile" && (
-        <ProfileView
-          client={client}
-          account={accountState.status === "account" ? accountState.data : null}
-          legacyReason={accountState.status === "legacy" ? accountState.error : undefined}
-          onUserChange={updateAccountUser}
-        />
+        accountState.status === "account"
+          ? <ProfileView client={client} account={accountState.data} onUserChange={updateAccountUser} />
+          : <AccountRequiredPanel state={accountState} />
       )}
       {view.name === "settings" && (
         <SettingsView
@@ -192,29 +227,41 @@ export function App() {
           theme={theme}
           accent={accent}
           density={density}
+          background={background}
+          terminalTheme={terminalTheme}
+          transcriptDefault={transcriptDefault}
+          landingPage={landingPage}
+          terminalBehavior={terminalBehavior}
           onThemeChange={setTheme}
           onAccentChange={setAccent}
           onDensityChange={setDensity}
+          onBackgroundChange={setBackground}
+          onTerminalThemeChange={setTerminalTheme}
+          onTranscriptDefaultChange={setTranscriptDefault}
+          onLandingPageChange={setLandingPage}
+          onTerminalBehaviorChange={setTerminalBehavior}
         />
       )}
       {view.name === "detail" && (
         <DetailView
           client={client}
-          readToken={token}
-          terminalToken={terminalToken}
-          onTerminalTokenChange={setTerminalToken}
+          accountToken={token}
           reference={view.ref}
+          onOpenTerminal={openTerminalFromSession}
+          transcriptDefault={transcriptDefault}
         />
       )}
       {view.name === "terminalLive" && (
-        <TerminalLiveView
-          client={client}
-          readToken={token}
-          terminalToken={terminalToken}
-          onTerminalTokenChange={setTerminalToken}
-          reference={view.ref}
-          terminalId={view.terminalId}
-        />
+        <Suspense fallback={<Loading title="Terminal Runtime" />}>
+          <TerminalLiveView
+            client={client}
+            accountToken={token}
+            reference={view.ref}
+            terminalId={view.terminalId}
+            terminalTheme={terminalTheme}
+            onTerminalThemeChange={setTerminalTheme}
+          />
+        </Suspense>
       )}
     </Shell>
   );
@@ -231,6 +278,11 @@ export function App() {
   function navigateToTerminal(ref: SessionRef, terminalId: string) {
     window.location.hash = terminalLiveHash(ref, terminalId);
     setView({ name: "terminalLive", ref, terminalId });
+  }
+
+  async function openTerminalFromSession(ref: SessionRef, mode: TerminalMode) {
+    const terminal = await requestTerminalOpen(token, ref, mode);
+    navigateToTerminal(terminal.session, terminal.terminal_id);
   }
 
   function updateAccountUser(user: AccountUser) {
@@ -283,7 +335,7 @@ function Shell({
         </nav>
         <div className="side-footer">
           <div className="strong">local gateway</div>
-          <div>Browser view, daemon-owned runtime</div>
+          <div>Runtime: daemon</div>
           <button className="btn small-btn" type="button" onClick={onLogout}><LogOut size={14} /> Sign out</button>
         </div>
       </aside>
@@ -307,10 +359,90 @@ function Shell({
   );
 }
 
-function DashboardView({ client, terminalToken, onOpen }: { client: ApiClient; terminalToken: string; onOpen: (session: SessionSummary) => void }) {
+function AccountRequiredPanel({ state }: { state: AccountState }) {
+  if (state.status === "loading") return <Loading title="Profile" />;
+  if (state.status === "account") return null;
+  return (
+    <section className="center-panel error">
+      <ShieldCheck size={18} />
+      <h1>Account required</h1>
+      <p>{state.error}</p>
+    </section>
+  );
+}
+
+function PublicShareView({ linkId, shareToken }: { linkId: string; shareToken: string }) {
+  const client = useMemo(() => new ApiClient(""), []);
+  const [state, setState] = useState<LoadState<SessionDetail>>({ status: "loading" });
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setState({ status: "loading" });
+    setError("");
+    client.publicShare(linkId, shareToken)
+      .then((data) => setState({ status: "ready", data: data.session }))
+      .catch((failure: Error) => {
+        setState({ status: "error", error: failure.message });
+        setError(failure.message);
+      });
+  }, [client, linkId, shareToken]);
+
+  if (state.status === "loading" || state.status === "idle") {
+    return <main className="public-share"><Loading title="Shared session" /></main>;
+  }
+
+  if (state.status === "error") {
+    return (
+      <main className="public-share">
+        <section className="center-panel">
+          <ShieldCheck size={18} />
+          <h1>Shared view unavailable</h1>
+          <p>Share unavailable.</p>
+          <p className="small muted">{error}</p>
+        </section>
+      </main>
+    );
+  }
+
+  const { summary, transcript } = state.data;
+  const firstPrompt = summary.first_user_message?.trim() || "";
+  const transcriptMessages = firstPrompt && transcript[0] && isFirstPromptDuplicate(firstPrompt, transcript[0]) ? transcript.slice(1) : transcript;
+
+  return (
+    <main className="public-share">
+      <header className="public-share-head">
+        <div className="brand-lockup">
+          <div className="mark">c</div>
+          <div><b>coca</b><span>read-only shared session</span></div>
+        </div>
+        <span className="status-badge info">public read-only</span>
+      </header>
+      <section className="transcript-shell" aria-label="Shared transcript">
+        <header className="transcript-toolbar">
+          <div><b>{summary.title}</b> <span className="small muted">{summary.provider} / {summary.origin}</span></div>
+          <span className="tag">read-only</span>
+        </header>
+        <div className="timeline">
+          {!firstPrompt && transcriptMessages.length === 0 && <EmptyState title="No transcript reconstructed" body="The shared session was found, but no ordered user or assistant text could be rebuilt." />}
+          {firstPrompt && <FirstPromptItem prompt={firstPrompt} />}
+          {transcriptMessages.map((message, index: number) => (
+            <Message
+              key={`${message.timestamp_ms ?? index}:${index}`}
+              message={message}
+              index={index + (firstPrompt ? 1 : 0)}
+              defaultMode="rendered"
+            />
+          ))}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function DashboardView({ client, onOpen }: { client: ApiClient; onOpen: (session: SessionSummary) => void }) {
   const [sessions, setSessions] = useState<LoadState<SessionsResponse>>({ status: "loading" });
   const [config, setConfig] = useState<LoadState<ConfigSummary>>({ status: "loading" });
-  const [terminals, setTerminals] = useState<LoadState<TerminalSessionsResponse>>({ status: terminalToken ? "loading" : "idle" });
+  const [terminals, setTerminals] = useState<LoadState<TerminalSessionsResponse>>({ status: "loading" });
 
   useEffect(() => {
     setSessions({ status: "loading" });
@@ -320,18 +452,27 @@ function DashboardView({ client, terminalToken, onOpen }: { client: ApiClient; t
   }, [client]);
 
   useEffect(() => {
-    if (!terminalToken) {
-      setTerminals({ status: "idle" });
-      return;
-    }
     setTerminals({ status: "loading" });
-    client.terminalSessions(terminalToken).then((data) => setTerminals({ status: "ready", data })).catch((error: Error) => setTerminals({ status: "error", error: error.message }));
-  }, [client, terminalToken]);
+    client.terminalSessions().then((data) => setTerminals({ status: "ready", data })).catch((error: Error) => setTerminals({ status: "error", error: error.message }));
+  }, [client]);
 
   const sessionData = sessions.status === "ready" ? sessions.data : null;
   const configData = config.status === "ready" ? config.data : null;
   const terminalData = terminals.status === "ready" ? terminals.data.terminals : [];
   const recentSessions = sessionData?.sessions.slice(0, 6) ?? [];
+  const pinnedSessions = recentSessions.slice(0, 3);
+  const activityRows = [
+    ...terminalData.slice(0, 3).map((terminal) => ({
+      id: `terminal:${terminal.terminal_id}`,
+      label: terminal.terminal_id,
+      detail: `${terminal.state.toLowerCase()} / ${terminal.session.provider} / ${terminal.session.origin}`
+    })),
+    ...recentSessions.slice(0, Math.max(0, 5 - Math.min(3, terminalData.length))).map((session) => ({
+      id: `session:${sessionKey(session)}`,
+      label: session.title,
+      detail: `${session.provider} / ${session.origin} / ${session.updated_label}`
+    }))
+  ].slice(0, 5);
 
   return (
     <div className="grid-12">
@@ -349,7 +490,6 @@ function DashboardView({ client, terminalToken, onOpen }: { client: ApiClient; t
         </div>
       </Module>
       <Module className="span-5" title="Active Terminals" icon={<TerminalSquare size={16} />} action={<a className="btn small-btn" href="#/terminals">Manage</a>}>
-        {!terminalToken && <Notice tone="warning" title="Terminal token missing" body="Save a terminal token in Active Terminals or Settings to inspect daemon-owned runtime objects." />}
         {terminals.status === "loading" && <SkeletonRows count={4} />}
         {terminals.status === "error" && <Notice tone="error" title="Terminal registry unavailable" body={terminals.error} />}
         {terminalData.length === 0 && terminals.status === "ready" && <EmptyState title="No active terminals" body="The daemon registry returned no terminal sessions." />}
@@ -363,25 +503,44 @@ function DashboardView({ client, terminalToken, onOpen }: { client: ApiClient; t
           ))}
         </div>
       </Module>
-      <Module className="span-4" title="Runtime Boundary" icon={<Workflow size={16} />}>
-        <div className="provenance-strip"><span>Browser</span><b>&gt;</b><span>Gateway</span><b>&gt;</b><span>Daemon</span></div>
-        <p className="muted">Transcript browsing stays read-only. Terminal actions route through gateway authorization and daemon runtime ownership.</p>
+      <Module className="span-4" title="Pinned Sessions" icon={<ShieldCheck size={16} />}>
+        {sessions.status === "loading" && <SkeletonRows count={3} />}
+        {sessions.status === "error" && <Notice tone="error" title="Sessions unavailable" body={sessions.error} />}
+        {pinnedSessions.length === 0 && sessions.status === "ready" && <EmptyState title="No pinned sessions" body="No sessions available." />}
+        <div className="list">
+          {pinnedSessions.map((session) => (
+            <button className="list-row session-mini" type="button" key={sessionKey(session)} onClick={() => onOpen(session)}>
+              <span className="truncate">{session.title}</span>
+              <TerminalCapabilityBadge session={session} />
+            </button>
+          ))}
+        </div>
       </Module>
-      <Module className="span-4" title="Service State" icon={<Activity size={16} />}>
+      <Module className="span-4" title="Recent Activity" icon={<Activity size={16} />}>
+        {(sessions.status === "loading" || terminals.status === "loading") && <SkeletonRows count={4} />}
+        {sessions.status === "error" && <Notice tone="error" title="Sessions unavailable" body={sessions.error} />}
+        {terminals.status === "error" && <Notice tone="error" title="Terminals unavailable" body={terminals.error} />}
+        {activityRows.length === 0 && sessions.status === "ready" && terminals.status === "ready" && <EmptyState title="No activity" body="No sessions or terminals loaded." />}
+        <div className="list">
+          {activityRows.map((row) => (
+            <div className="list-row activity-mini" key={row.id}>
+              <span className="truncate"><b>{row.label}</b><span className="small muted truncate">{row.detail}</span></span>
+            </div>
+          ))}
+        </div>
+      </Module>
+      <Module className="span-4" title="Provenance" icon={<Workflow size={16} />}>
+        <div className="provenance-strip"><span>Browser</span><b>&gt;</b><span>Gateway</span><b>&gt;</b><span>Daemon</span></div>
         {config.status === "loading" && <SkeletonRows count={3} />}
         {config.status === "error" && <Notice tone="error" title="Config unavailable" body={config.error} />}
         {configData && (
           <dl className="meta-grid">
             <dt>Gateway bind</dt><dd className="mono truncate">{configData.gateway_bind}</dd>
-            <dt>Share token</dt><dd>{configData.share.token_configured ? "configured" : "missing"}</dd>
+            <dt>Share base</dt><dd className="mono truncate">{configData.share.base_url}</dd>
             <dt>Terminal</dt><dd>{configData.terminal.enabled ? "enabled" : "disabled"}</dd>
             <dt>Remotes</dt><dd>{configData.remotes.length}</dd>
           </dl>
         )}
-      </Module>
-      <Module className="span-4" title="State Coverage" icon={<ShieldCheck size={16} />}>
-        <Notice tone="success" title="Ready" body="Sessions and configuration load through gateway APIs." />
-        <Notice tone="warning" title="Browse-only" body="Remote or unsupported sessions keep transcript access and disable runtime actions with reasons." />
       </Module>
     </div>
   );
@@ -389,6 +548,7 @@ function DashboardView({ client, terminalToken, onOpen }: { client: ApiClient; t
 
 function SessionsView({ client, onOpen }: { client: ApiClient; onOpen: (session: SessionSummary) => void }) {
   const [state, setState] = useState<LoadState<SessionsResponse>>({ status: "loading" });
+  const [terminals, setTerminals] = useState<LoadState<TerminalSessionsResponse>>({ status: "loading" });
   const [query, setQuery] = useState("");
   const [provider, setProvider] = useState("all");
   const [origin, setOrigin] = useState("all");
@@ -401,6 +561,13 @@ function SessionsView({ client, onOpen }: { client: ApiClient; onOpen: (session:
     client.sessions().then((data) => setState({ status: "ready", data })).catch((error: Error) => setState({ status: "error", error: error.message }));
   }, [client]);
 
+  useEffect(() => {
+    setTerminals({ status: "loading" });
+    client.terminalSessions()
+      .then((data) => setTerminals({ status: "ready", data }))
+      .catch((error: Error) => setTerminals({ status: "error", error: error.message }));
+  }, [client]);
+
   if (state.status === "loading" || state.status === "idle") return <Loading title="Sessions" />;
   if (state.status === "error") return <ErrorPanel title="Sessions" error={state.error} />;
   if (state.status !== "ready") return <Loading title="Sessions" />;
@@ -409,6 +576,7 @@ function SessionsView({ client, onOpen }: { client: ApiClient; onOpen: (session:
   const providers = unique(data.sessions.map((session) => session.provider));
   const origins = unique(data.sessions.map((session) => session.origin));
   const models = unique(data.sessions.map((session) => session.model ?? "-"));
+  const terminalIndex = terminals.status === "ready" ? terminalsBySession(terminals.data.terminals) : new Map<string, TerminalSessionSummary[]>();
   const filtered = data.sessions.filter((session) => {
     const haystack = `${session.origin} ${session.provider} ${session.title} ${session.cwd} ${session.model ?? ""}`.toLowerCase();
     const readinessLabel = terminalReadiness(session).toLowerCase();
@@ -445,8 +613,18 @@ function SessionsView({ client, onOpen }: { client: ApiClient; onOpen: (session:
         </div>
         <div className="filter-row compact-row"><ListFilter size={15} /><Select value={sort} onChange={setSort} options={["recent", "provider", "messages"]} label="Sort" /></div>
       </section>
-      <div className="table-wrap">
+      <div className="table-wrap sessions-table">
         <table>
+          <colgroup>
+            <col style={{ width: "42%" }} />
+            <col style={{ width: "8%" }} />
+            <col style={{ width: "7%" }} />
+            <col style={{ width: "18%" }} />
+            <col style={{ width: "10%" }} />
+            <col style={{ width: "7%" }} />
+            <col style={{ width: "4%" }} />
+            <col style={{ width: "10%" }} />
+          </colgroup>
           <thead>
             <tr>
               <th>Title</th>
@@ -469,7 +647,7 @@ function SessionsView({ client, onOpen }: { client: ApiClient; onOpen: (session:
                 <td><div className="truncate">{session.model ?? "-"}</div></td>
                 <td>{session.updated_label}</td>
                 <td className="count">{session.message_count}</td>
-                <td><TerminalCapabilityBadge session={session} /></td>
+                <td><SessionTerminalCell session={session} terminals={terminalIndex.get(sessionKey(session)) ?? []} /></td>
               </tr>
             ))}
           </tbody>
@@ -482,25 +660,34 @@ function SessionsView({ client, onOpen }: { client: ApiClient; onOpen: (session:
 
 function DetailView({
   client,
-  readToken,
-  terminalToken,
-  onTerminalTokenChange,
-  reference
+  accountToken,
+  reference,
+  onOpenTerminal,
+  transcriptDefault
 }: {
   client: ApiClient;
-  readToken: string;
-  terminalToken: string;
-  onTerminalTokenChange: (token: string) => void;
+  accountToken: string;
   reference: SessionRef;
+  onOpenTerminal: (ref: SessionRef, mode: TerminalMode) => Promise<void>;
+  transcriptDefault: TranscriptDefault;
 }) {
   const [state, setState] = useState<LoadState<SessionDetail>>({ status: "loading" });
+  const [terminals, setTerminals] = useState<LoadState<TerminalSessionsResponse>>({ status: "loading" });
   const [share, setShare] = useState("");
+  const [launchState, setLaunchState] = useState<{ status: "idle" | "connecting" | "error"; message: string }>({ status: "idle", message: "" });
 
   useEffect(() => {
     setState({ status: "loading" });
     setShare("");
     client.session(reference).then((data) => setState({ status: "ready", data })).catch((error: Error) => setState({ status: "error", error: error.message }));
   }, [client, reference.origin, reference.provider, reference.id]);
+
+  useEffect(() => {
+    setTerminals({ status: "loading" });
+    client.terminalSessions()
+      .then((data) => setTerminals({ status: "ready", data }))
+      .catch((error: Error) => setTerminals({ status: "error", error: error.message }));
+  }, [client]);
 
   if (state.status === "loading" || state.status === "idle") return <Loading title="Session" />;
   if (state.status === "error") return <ErrorPanel title="Session" error={state.error} />;
@@ -509,6 +696,21 @@ function DetailView({
   const { summary, transcript } = state.data;
   const firstPrompt = summary.first_user_message?.trim() || "";
   const transcriptMessages = firstPrompt && transcript[0] && isFirstPromptDuplicate(firstPrompt, transcript[0]) ? transcript.slice(1) : transcript;
+  const relatedTerminals = terminals.status === "ready"
+    ? terminals.data.terminals.filter((terminal) => sameSessionRef(terminal.session, reference) && terminal.state !== "Exited")
+    : [];
+  const canResume = summary.terminal.enabled && summary.terminal.can_resume && Boolean(accountToken) && launchState.status !== "connecting";
+  const canFork = summary.terminal.enabled && summary.terminal.can_fork && Boolean(accountToken) && launchState.status !== "connecting";
+
+  async function launchTerminal(mode: TerminalMode) {
+    setLaunchState({ status: "connecting", message: `Requesting ${mode.toLowerCase()} terminal...` });
+    try {
+      await onOpenTerminal(reference, mode);
+      setLaunchState({ status: "idle", message: "" });
+    } catch (error) {
+      setLaunchState({ status: "error", message: error instanceof Error ? error.message : "Terminal open failed." });
+    }
+  }
 
   return (
     <div className="stack wide-stack detail-stack">
@@ -530,24 +732,23 @@ function DetailView({
         </div>
       </header>
       {share && <div className="notice"><code>{share}</code></div>}
-      <TerminalPanel
-        client={client}
-        readToken={readToken}
-        terminalToken={terminalToken}
-        onTerminalTokenChange={onTerminalTokenChange}
-        session={summary}
-        reference={reference}
-      />
       <div className="detail-layout">
         <section className="transcript-shell" aria-label="Transcript">
           <header className="transcript-toolbar">
-            <div><b>Transcript Timeline</b> <span className="small muted">read-only execution history</span></div>
-            <span className="tag">transcript.read</span>
+            <div><b>Transcript Timeline</b></div>
+            <span className="tag">sessions.read</span>
           </header>
           <div className="timeline">
             {!firstPrompt && transcriptMessages.length === 0 && <EmptyState title="No transcript reconstructed" body="The provider history was found, but no ordered user or assistant text could be rebuilt." />}
             {firstPrompt && <FirstPromptItem prompt={firstPrompt} />}
-            {transcriptMessages.map((message, index: number) => <Message key={`${message.timestamp_ms ?? index}:${index}`} message={message} index={index + (firstPrompt ? 1 : 0)} />)}
+            {transcriptMessages.map((message, index: number) => (
+              <Message
+                key={`${message.timestamp_ms ?? index}:${index}`}
+                message={message}
+                index={index + (firstPrompt ? 1 : 0)}
+                defaultMode={transcriptDefault}
+              />
+            ))}
           </div>
         </section>
         <aside className="context-panel">
@@ -558,19 +759,27 @@ function DetailView({
               <dt>Origin</dt><dd>{summary.origin}</dd>
               <dt>cwd</dt><dd className="mono truncate">{summary.cwd}</dd>
               <dt>Messages</dt><dd>{summary.message_count}</dd>
-              <dt>Scope</dt><dd>transcript.read</dd>
+              <dt>Scope</dt><dd>sessions.read</dd>
             </dl>
           </Module>
           <Module title="Runtime Readiness" icon={<TerminalSquare size={16} />} action={<TerminalCapabilityBadge session={summary} />}>
-            <Notice
-              tone={summary.terminal.enabled ? "success" : "warning"}
-              title={terminalReadiness(summary)}
-              body={summary.terminal.unavailable_message ?? "Resume and fork requests go through gateway authorization and daemon runtime ownership."}
-            />
+            {summary.terminal.unavailable_message && <Notice tone="warning" title={terminalReadiness(summary)} body={summary.terminal.unavailable_message} />}
             <div className="provenance-strip"><span>Browser</span><b>&gt;</b><span>Gateway</span><b>&gt;</b><span>Daemon</span></div>
+            <div className="panel-actions runtime-actions">
+              <button className="btn primary small-btn" type="button" disabled={!canResume} onClick={() => launchTerminal("Resume")}>Resume</button>
+              <button className="btn small-btn" type="button" disabled={!canFork} onClick={() => launchTerminal("Fork")}>Fork</button>
+            </div>
+            {launchState.status !== "idle" && <p className={`save-status ${launchState.status === "error" ? "error-text" : ""}`}>{launchState.message}</p>}
           </Module>
-          <Module title="Share / Read-only Scope" icon={<ShieldCheck size={16} />}>
-            <p className="muted">Shared views include transcript, metadata, and provenance. They do not include terminal write tokens.</p>
+          <Module title="Related Running Terminals" icon={<TerminalSquare size={16} />}>
+            {terminals.status === "loading" && <p className="muted">Loading terminal registry...</p>}
+            {terminals.status === "error" && <Notice tone="warning" title="Terminal registry unavailable" body={terminals.error} />}
+            {terminals.status === "ready" && relatedTerminals.length === 0 && <p className="muted">No active terminals are registered for this session.</p>}
+            {relatedTerminals.length > 0 && (
+              <div className="terminal-link-list">
+                {relatedTerminals.map((terminal) => <TerminalLinkRow terminal={terminal} key={terminal.terminal_id} />)}
+              </div>
+            )}
           </Module>
         </aside>
       </div>
@@ -580,24 +789,26 @@ function DetailView({
 
 function TerminalLiveView({
   client,
-  readToken,
-  terminalToken,
-  onTerminalTokenChange,
+  accountToken,
   reference,
-  terminalId
+  terminalId,
+  terminalTheme,
+  onTerminalThemeChange
 }: {
   client: ApiClient;
-  readToken: string;
-  terminalToken: string;
-  onTerminalTokenChange: (token: string) => void;
+  accountToken: string;
   reference: SessionRef;
   terminalId: string;
+  terminalTheme: TerminalTheme;
+  onTerminalThemeChange: (theme: TerminalTheme) => void;
 }) {
   const [state, setState] = useState<LoadState<SessionDetail>>({ status: "loading" });
   const [runtimeState, setRuntimeState] = useState("opening terminal stream");
+  const [runtimeNotice, setRuntimeNotice] = useState<string | null>(null);
 
   useEffect(() => {
     setState({ status: "loading" });
+    setRuntimeNotice(null);
     client.session(reference).then((data) => setState({ status: "ready", data })).catch((error: Error) => setState({ status: "error", error: error.message }));
   }, [client, reference.origin, reference.provider, reference.id]);
 
@@ -607,6 +818,22 @@ function TerminalLiveView({
 
   const { summary, transcript } = state.data;
   const transcriptHref = `#/session/${encodePart(reference.origin)}/${encodePart(reference.provider)}/${encodePart(reference.id)}`;
+  const sourceTranscript = transcript.slice(0, 4);
+
+  function handleTerminalOpened(terminal: TerminalSessionSummary) {
+    const canonicalHash = terminalLiveHash(terminal.session, terminal.terminal_id);
+    const currentHash = window.location.hash || "#/";
+    if (terminal.terminal_id !== terminalId || !sameSessionRef(terminal.session, reference) || currentHash !== canonicalHash) {
+      setRuntimeState("correcting terminal route");
+      setRuntimeNotice(`Terminal registry returned ${terminal.terminal_id} for ${terminal.session.provider}/${terminal.session.origin}; correcting the live route.`);
+      window.setTimeout(() => {
+        window.location.hash = canonicalHash;
+      }, 0);
+      return;
+    }
+    setRuntimeState("attached");
+    setRuntimeNotice(null);
+  }
 
   return (
     <div className="terminal-workspace">
@@ -629,23 +856,38 @@ function TerminalLiveView({
       <div className="terminal-live-main">
         <TerminalPanel
           client={client}
-          readToken={readToken}
-          terminalToken={terminalToken}
-          onTerminalTokenChange={onTerminalTokenChange}
+          accountToken={accountToken}
           session={summary}
           reference={reference}
           initialAttachId={terminalId}
           variant="live"
-          onAttachReady={() => setRuntimeState("attached")}
+          terminalTheme={terminalTheme}
+          onAttachReady={handleTerminalOpened}
           onAttachError={() => setRuntimeState("attach failed")}
           onDetach={() => setRuntimeState("detached")}
         />
         <aside className="terminal-side" aria-label="Terminal context">
-          <Module title="Runtime Scope" icon={<Workflow size={16} />}>
+          {runtimeNotice && <Notice tone="warning" title="Terminal route corrected" body={runtimeNotice} />}
+          <Module title="Runtime Boundary" icon={<Workflow size={16} />}>
             <div className="provenance-strip"><span>Browser</span><b>&gt;</b><span>Gateway</span><b>&gt;</b><span>Daemon</span></div>
-            <p className="muted">This page is a live view of a daemon-owned terminal. The browser holds no lifecycle authority.</p>
           </Module>
-          <Module title="Session" icon={<Database size={16} />}>
+          <Module title="Terminal Theme" icon={<TerminalSquare size={16} />}>
+            <div className="theme-picker terminal-theme-picker">
+              {terminalThemes.map((item) => (
+                <button
+                  className={`theme-choice ${terminalTheme === item.id ? "active" : ""}`}
+                  style={{ "--swatch": item.swatch } as CSSProperties}
+                  type="button"
+                  key={item.id}
+                  onClick={() => onTerminalThemeChange(item.id)}
+                >
+                  <span className="theme-swatch" />
+                  <span>{item.label}</span>
+                </button>
+              ))}
+            </div>
+          </Module>
+          <Module title="Terminal Metadata" icon={<Database size={16} />}>
             <dl className="meta-grid">
               <dt>Terminal</dt><dd className="mono truncate">{terminalId}</dd>
               <dt>Session id</dt><dd className="mono truncate">{summary.id}</dd>
@@ -655,12 +897,16 @@ function TerminalLiveView({
               <dt>Messages</dt><dd>{transcript.length}</dd>
             </dl>
           </Module>
-          <Module title="Readiness" icon={<TerminalSquare size={16} />} action={<TerminalCapabilityBadge session={summary} />}>
-            <Notice
-              tone={summary.terminal.enabled ? "success" : "warning"}
-              title={terminalReadiness(summary)}
-              body={summary.terminal.unavailable_message ?? "Attach, detach, resize, input, and kill requests are sent through the gateway WebSocket to the daemon."}
-            />
+          <Module title="Source Transcript" icon={<FileText size={16} />} action={<a className="btn small-btn" href={transcriptHref}>Open</a>}>
+            <div className="list">
+              {sourceTranscript.map((message, index) => (
+                <a className="list-row session-mini" href={transcriptHref} key={`${message.timestamp_ms ?? index}:${index}`}>
+                  <span className="truncate"><b className="mono">#{String(index + 1).padStart(2, "0")}</b> {excerpt(message.text)}</span>
+                  <span className="tag">{transcriptRole(message.display_role)}</span>
+                </a>
+              ))}
+              {sourceTranscript.length === 0 && <EmptyState title="No transcript" body="No messages loaded." />}
+            </div>
           </Module>
         </aside>
       </div>
@@ -721,39 +967,27 @@ function OriginsView({ client }: { client: ApiClient }) {
             ))}
           </tbody>
         </table>
-        {remotes.length === 0 && <EmptyState title="No origins" body="No remotes match the current filters. Fleet install/update/uninstall telemetry is not exposed by the current gateway API." />}
+        {remotes.length === 0 && <EmptyState title="No origins" body="No remotes match the current filters." />}
       </div>
-      <Notice tone="info" title="API boundary" body="This page maps to configured remote summaries only. Machine telemetry and client lifecycle actions are tracked in .ai/gap.md." />
     </div>
   );
 }
 
 function TerminalsView({
   client,
-  terminalToken,
-  onTerminalTokenChange,
   onOpenSession
 }: {
   client: ApiClient;
-  terminalToken: string;
-  onTerminalTokenChange: (token: string) => void;
   onOpenSession: (ref: SessionRef, terminalId: string) => void;
 }) {
-  const [draftToken, setDraftToken] = useState("");
-  const [state, setState] = useState<LoadState<TerminalSessionsResponse>>({ status: terminalToken ? "loading" : "idle" });
+  const [state, setState] = useState<LoadState<TerminalSessionsResponse>>({ status: "loading" });
   const [query, setQuery] = useState("");
   const [terminalState, setTerminalState] = useState("all");
-  const [attaching, setAttaching] = useState<TerminalSessionSummary | null>(null);
-  const attachTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!terminalToken) {
-      setState({ status: "idle" });
-      return;
-    }
     setState({ status: "loading" });
-    client.terminalSessions(terminalToken).then((data) => setState({ status: "ready", data })).catch((error: Error) => setState({ status: "error", error: error.message }));
-  }, [client, terminalToken]);
+    client.terminalSessions().then((data) => setState({ status: "ready", data })).catch((error: Error) => setState({ status: "error", error: error.message }));
+  }, [client]);
 
   const terminals = state.status === "ready" ? state.data.terminals.filter((terminal) => {
     const haystack = `${terminal.terminal_id} ${terminal.session.origin} ${terminal.session.provider} ${terminal.session.id} ${terminal.mode} ${terminal.state}`.toLowerCase();
@@ -761,71 +995,14 @@ function TerminalsView({
       (terminalState === "all" || terminal.state.toLowerCase() === terminalState);
   }) : [];
 
-  function submitTerminalToken(event: FormEvent) {
-    event.preventDefault();
-    const token = draftToken.trim();
-    if (!token) return;
-    saveTerminalToken(token);
-    onTerminalTokenChange(token);
-    setDraftToken("");
-  }
-
-  function clearSavedTerminalToken() {
-    clearTerminalToken();
-    onTerminalTokenChange("");
-    setDraftToken("");
-  }
-
-  function clearAttachTimer() {
-    if (attachTimerRef.current !== null) {
-      window.clearTimeout(attachTimerRef.current);
-      attachTimerRef.current = null;
-    }
-  }
-
-  function beginAttach(terminal: TerminalSessionSummary) {
-    clearAttachTimer();
-    setAttaching(terminal);
-    attachTimerRef.current = window.setTimeout(() => {
-      attachTimerRef.current = null;
-      onOpenSession(terminal.session, terminal.terminal_id);
-      setAttaching(null);
-    }, 1300);
-  }
-
-  function cancelAttach() {
-    clearAttachTimer();
-    setAttaching(null);
-  }
-
-  useEffect(() => clearAttachTimer, []);
-
   return (
     <div className="stack wide-stack">
-      {attaching && <AttachOverlay terminal={attaching} onCancel={cancelAttach} />}
-      <Module title="Terminal Access" icon={<KeyRound size={16} />}>
-        <div className="terminal-access compact-access">
-          <div>
-            <strong>Terminal token</strong>
-            <span>{terminalToken ? "saved for this browser" : "required for daemon terminal registry and attach operations"}</span>
-          </div>
-          {terminalToken ? (
-            <button className="btn small-btn" type="button" onClick={clearSavedTerminalToken}>Clear token</button>
-          ) : (
-            <form className="terminal-token-form" onSubmit={submitTerminalToken}>
-              <input type="password" value={draftToken} onChange={(event) => setDraftToken(event.target.value)} placeholder="Terminal token" aria-label="Terminal token" />
-              <button className="btn primary small-btn" type="submit">Save</button>
-            </form>
-          )}
-        </div>
-      </Module>
       <section className="toolbar">
         <div className="filter-row">
           <label className="filter-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search terminal id, session, origin" /></label>
           <Select value={terminalState} onChange={setTerminalState} options={["all", "starting", "running", "detached", "exited"]} label="State" />
         </div>
       </section>
-      {state.status === "idle" && <Notice tone="warning" title="Terminal token missing" body="Save a terminal token to load daemon-owned terminal sessions." />}
       {state.status === "loading" && <Loading title="Active Terminals" />}
       {state.status === "error" && <ErrorPanel title="Active Terminals" error={state.error} />}
       {state.status === "ready" && (
@@ -851,7 +1028,7 @@ function TerminalsView({
                   <td><StatusBadge label={terminal.state.toLowerCase()} tone={terminalTone(terminal.state)} /></td>
                   <td className="count">{terminal.attached_clients}</td>
                   <td className="mono">{terminal.size.cols}x{terminal.size.rows}</td>
-                  <td><button className="btn primary small-btn" type="button" onClick={() => beginAttach(terminal)} disabled={terminal.state === "Exited"}><Plug size={14} /> Attach</button></td>
+                  <td><button className="btn primary small-btn" type="button" onClick={() => onOpenSession(terminal.session, terminal.terminal_id)} disabled={terminal.state === "Exited"}><Plug size={14} /> Attach</button></td>
                 </tr>
               ))}
             </tbody>
@@ -859,45 +1036,6 @@ function TerminalsView({
           {terminals.length === 0 && <EmptyState title="Filtered empty" body="No terminals match the current search or state filter." />}
         </div>
       )}
-      <div className="grid-12">
-        <Module className="span-6" title="Runtime unavailable" icon={<CircleAlert size={16} />}>
-          <Notice tone="error" title="Daemon unavailable" body="Terminal lifecycle cannot be changed from the browser when the daemon or socket is unavailable. Transcript browsing remains available." />
-        </Module>
-        <Module className="span-6" title="Runtime Boundary" icon={<Workflow size={16} />}>
-          <div className="provenance-strip"><span>Browser</span><b>&gt;</b><span>Gateway</span><b>&gt;</b><span>Daemon</span></div>
-        </Module>
-      </div>
-    </div>
-  );
-}
-
-function AttachOverlay({ terminal, onCancel }: { terminal: TerminalSessionSummary; onCancel: () => void }) {
-  return (
-    <div className="attach-overlay active" role="status" aria-live="polite">
-      <div className="attach-card">
-        <div className="attach-head">
-          <div className="head-symbol"><TerminalSquare size={16} /></div>
-          <div className="truncate">
-            <b>Attaching terminal runtime</b>
-            <div className="small muted truncate">{terminal.terminal_id} / {terminal.session.provider} / {terminal.session.origin}</div>
-          </div>
-          <button className="btn small-btn" type="button" onClick={onCancel}>Cancel</button>
-        </div>
-        <div className="attach-stage">
-          <div className="attach-route">
-            <div className="attach-node done"><LayoutDashboard size={16} /><b>Browser</b><span>Request terminal.attach scope</span></div>
-            <div className="attach-rail" />
-            <div className="attach-node active"><ShieldCheck size={16} /><b>Gateway</b><span>Authorize token and socket</span></div>
-            <div className="attach-rail" />
-            <div className="attach-node"><Plug size={16} /><b>Daemon</b><span>Own runtime lifecycle</span></div>
-          </div>
-          <div className="attach-log">
-            <div>browser: terminal attach requested</div>
-            <div>gateway: validating terminal token and session scope</div>
-            <div>daemon: opening pty stream for {terminal.terminal_id}</div>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
@@ -907,17 +1045,37 @@ function SettingsView({
   theme,
   accent,
   density,
+  background,
+  terminalTheme,
+  transcriptDefault,
+  landingPage,
+  terminalBehavior,
   onThemeChange,
   onAccentChange,
-  onDensityChange
+  onDensityChange,
+  onBackgroundChange,
+  onTerminalThemeChange,
+  onTranscriptDefaultChange,
+  onLandingPageChange,
+  onTerminalBehaviorChange
 }: {
   client: ApiClient;
   theme: Theme;
   accent: Accent;
   density: Density;
+  background: Background;
+  terminalTheme: TerminalTheme;
+  transcriptDefault: TranscriptDefault;
+  landingPage: LandingPage;
+  terminalBehavior: TerminalBehavior;
   onThemeChange: (theme: Theme) => void;
   onAccentChange: (accent: Accent) => void;
   onDensityChange: (density: Density) => void;
+  onBackgroundChange: (background: Background) => void;
+  onTerminalThemeChange: (theme: TerminalTheme) => void;
+  onTranscriptDefaultChange: (value: TranscriptDefault) => void;
+  onLandingPageChange: (value: LandingPage) => void;
+  onTerminalBehaviorChange: (value: TerminalBehavior) => void;
 }) {
   const [config, setConfig] = useState<LoadState<ConfigSummary>>({ status: "loading" });
   const [health, setHealth] = useState<LoadState<HealthResponse>>({ status: "loading" });
@@ -958,24 +1116,39 @@ function SettingsView({
     <div className="settings-layout">
       <aside className="module settings-index">
         <a href="#settings-preferences">Preferences</a>
+        <a href="#settings-access">Security / Access</a>
+        <a href="#settings-devices">Device Sessions</a>
         <a href="#settings-runtime">Runtime</a>
         <a href="#settings-ai">AI</a>
         <a href="#settings-remotes">Remotes</a>
       </aside>
       <div className="settings-main">
         {data.warnings.length > 0 && <Warnings warnings={data.warnings} />}
-        <Module id="settings-preferences" title="Preferences" icon={<Settings size={16} />} action={<span className="small muted">Saved locally</span>}>
-          <div className="setting-row"><div><b>Theme</b><span>Choose the workspace surface mode.</span></div><Segmented value={theme} values={["light", "dark"]} onChange={(value) => onThemeChange(value as Theme)} icons={{ light: <Sun size={15} />, dark: <Moon size={15} /> }} /></div>
-          <div className="setting-row"><div><b>Theme color</b><span>Pick the accent used for selected controls and active work states.</span></div><div className="theme-picker">{accentThemes.map((item) => <button className={`theme-choice ${accent === item.id ? "active" : ""}`} style={{ "--swatch": item.swatch } as CSSProperties} type="button" key={item.id} onClick={() => onAccentChange(item.id)}><span className="theme-swatch" /><span>{item.label}</span></button>)}</div></div>
-          <div className="setting-row"><div><b>Density</b><span>Adjust row height without changing type hierarchy.</span></div><Segmented value={density} values={["compact", "normal", "comfortable"]} onChange={(value) => onDensityChange(value as Density)} /></div>
+        <Module id="settings-preferences" title="Preferences" icon={<Settings size={16} />} action={<span className="small muted">Local</span>}>
+          <div className="setting-row"><div><b>Theme</b></div><Segmented value={theme} values={["light", "dark"]} onChange={(value) => onThemeChange(value as Theme)} icons={{ light: <Sun size={15} />, dark: <Moon size={15} /> }} /></div>
+          <div className="setting-row"><div><b>Background</b></div><Segmented value={background} values={backgroundOptions.map((item) => item.id)} onChange={(value) => onBackgroundChange(value as Background)} /></div>
+          <div className="setting-row"><div><b>Theme color</b></div><div className="theme-picker">{accentThemes.map((item) => <button className={`theme-choice ${accent === item.id ? "active" : ""}`} style={{ "--swatch": item.swatch } as CSSProperties} type="button" key={item.id} onClick={() => onAccentChange(item.id)}><span className="theme-swatch" /><span>{item.label}</span></button>)}</div></div>
+          <div className="setting-row"><div><b>Terminal theme</b></div><div className="theme-picker">{terminalThemes.map((item) => <button className={`theme-choice ${terminalTheme === item.id ? "active" : ""}`} style={{ "--swatch": item.swatch } as CSSProperties} type="button" key={item.id} onClick={() => onTerminalThemeChange(item.id)}><span className="theme-swatch" /><span>{item.label}</span></button>)}</div></div>
+          <div className="setting-row"><div><b>Density</b></div><Segmented value={density} values={["compact", "normal", "comfortable"]} onChange={(value) => onDensityChange(value as Density)} /></div>
+          <div className="setting-row"><div><b>Transcript</b></div><Segmented value={transcriptDefault} values={["rendered", "raw"]} onChange={(value) => onTranscriptDefaultChange(value as TranscriptDefault)} /></div>
+          <div className="setting-row"><div><b>Landing</b></div><Select value={landingPage} onChange={(value) => onLandingPageChange(value as LandingPage)} options={["dashboard", "sessions", "terminals"]} label="Page" /></div>
+          <div className="setting-row"><div><b>Terminal behavior</b></div><Select value={terminalBehavior} onChange={(value) => onTerminalBehaviorChange(value as TerminalBehavior)} options={["detach-confirm-kill", "ask-before-detach"]} label="Close" /></div>
+        </Module>
+        <Module id="settings-access" title="Security / Access" icon={<ShieldCheck size={16} />} action={<a className="btn small-btn" href="#/profile">Profile</a>}>
+          <div className="provenance-strip"><span>sessions.read</span><b>/</b><span>terminal.write</span><b>/</b><span>tokens.manage</span></div>
+        </Module>
+        <Module id="settings-devices" title="Device Sessions" icon={<UserRound size={16} />} action={<a className="btn small-btn" href="#/profile">Manage</a>}>
+          <div className="meta-grid">
+            <dt>Current account</dt><dd>Profile</dd>
+            <dt>Session controls</dt><dd>Device list</dd>
+          </div>
         </Module>
         <Module id="settings-runtime" title="Runtime" icon={<TerminalSquare size={16} />}>
           <div className="grid-two">
             <InfoPanel title="Service" rows={[
               ["active bind", data.bind],
               ["configured bind", data.gateway_bind],
-              ["share base", data.share.base_url],
-              ["share token", data.share.token_configured ? "set" : "missing"]
+              ["share base", data.share.base_url]
             ]} />
             <InfoPanel title="Terminal stream" rows={health.status === "ready" ? [
               ["protocol", health.data.stream.protocol],
@@ -984,7 +1157,6 @@ function SettingsView({
             ] : [["status", "unavailable"]]} />
             <InfoPanel title="Terminal access" rows={[
               ["enabled", data.terminal.enabled ? "yes" : "no"],
-              ["token", data.terminal.token_configured ? "configured" : "missing"],
               ["daemon", data.terminal.daemon_available ? "available" : "unavailable"],
               ["socket", data.terminal.terminal_socket_available ? "available" : "unavailable"],
               ["status", data.terminal.unavailable_message ?? "ready"]
@@ -1039,7 +1211,7 @@ function AiConfigPanel({ summary, draft, onDraftChange, status, onSave, onClearK
       <div className="ai-form">
         <label className="check-line">
           <input type="checkbox" checked={draft.enabled} onChange={(event) => onDraftChange({ ...draft, enabled: event.target.checked })} />
-          <span>Enable future session summaries</span>
+          <span>Session summaries</span>
         </label>
         <label className="field"><span>Base URL</span><input value={draft.baseUrl} onChange={(event) => onDraftChange({ ...draft, baseUrl: event.target.value })} /></label>
         <label className="field"><span>Model</span><input value={draft.model} onChange={(event) => onDraftChange({ ...draft, model: event.target.value })} /></label>
@@ -1072,10 +1244,10 @@ function FirstPromptItem({ prompt }: { prompt: string }) {
   );
 }
 
-function Message({ message, index }: { message: SessionDetail["transcript"][number]; index: number }) {
+function Message({ message, index, defaultMode }: { message: SessionDetail["transcript"][number]; index: number; defaultMode: TranscriptDefault }) {
   const role = transcriptRole(message.display_role);
   const [expanded, setExpanded] = useState(() => !shouldCollapseMessage(message));
-  const [mode, setMode] = useState<MessageMode>("preview");
+  const [mode, setMode] = useState<MessageMode>(defaultMode === "raw" ? "raw" : "preview");
   const roleLabel = roleMeta[role].label;
   const time = message.timestamp_label && message.timestamp_label !== "-" ? message.timestamp_label : `#${index + 1}`;
 
@@ -1212,6 +1384,41 @@ function TerminalCapabilityBadge({ session }: { session: SessionSummary }) {
   return <span className={`terminal-badge ${session.terminal.enabled ? "ready" : "blocked"}`} title={title}>{label}</span>;
 }
 
+function SessionTerminalCell({ session, terminals }: { session: SessionSummary; terminals: TerminalSessionSummary[] }) {
+  const activeTerminals = terminals.filter((terminal) => terminal.state !== "Exited");
+  if (activeTerminals.length === 0) return <TerminalCapabilityBadge session={session} />;
+  return (
+    <div className="session-terminal-cell">
+      <TerminalCapabilityBadge session={session} />
+      <div className="session-terminal-links">
+        {activeTerminals.slice(0, 2).map((terminal) => (
+          <a
+            className="tag mono"
+            href={terminalLiveHash(terminal.session, terminal.terminal_id)}
+            key={terminal.terminal_id}
+            onClick={(event) => event.stopPropagation()}
+          >
+            {terminal.terminal_id}
+          </a>
+        ))}
+        {activeTerminals.length > 2 && <span className="tag">+{activeTerminals.length - 2}</span>}
+      </div>
+    </div>
+  );
+}
+
+function TerminalLinkRow({ terminal }: { terminal: TerminalSessionSummary }) {
+  return (
+    <a className="terminal-link-row" href={terminalLiveHash(terminal.session, terminal.terminal_id)}>
+      <span className="truncate">
+        <b className="mono">{terminal.terminal_id}</b>
+        <small>{terminal.mode.toLowerCase()} / {terminal.session.provider} / {terminal.session.origin}</small>
+      </span>
+      <StatusBadge label={terminal.state.toLowerCase()} tone={terminalTone(terminal.state)} />
+    </a>
+  );
+}
+
 function SkeletonRows({ count }: { count: number }) {
   return <div className="skeleton-list">{Array.from({ length: count }, (_, index) => <div className="skeleton" key={index} />)}</div>;
 }
@@ -1265,12 +1472,87 @@ function exportTranscript(summary: SessionSummary, messages: SessionDetail["tran
   URL.revokeObjectURL(link.href);
 }
 
+function requestTerminalOpen(accountToken: string, ref: SessionRef, mode: TerminalMode): Promise<TerminalSessionSummary> {
+  return new Promise((resolve, reject) => {
+    if (!accountToken) {
+      reject(new Error("Sign in before opening a terminal."));
+      return;
+    }
+
+    let settled = false;
+    const socket = openTerminalSocket(accountToken);
+
+    function settleWithError(message: string) {
+      if (settled) return;
+      settled = true;
+      try {
+        socket.close();
+      } catch {
+        // The socket may already be closed by the browser.
+      }
+      reject(new Error(message));
+    }
+
+    socket.onopen = () => {
+      sendTerminalFrame(socket, {
+        event: "terminal.open",
+        payload: { session: ref, mode, size: launcherTerminalSize }
+      });
+    };
+
+    socket.onmessage = (event) => {
+      let frame: TerminalServerFrame;
+      try {
+        frame = JSON.parse(event.data) as TerminalServerFrame;
+      } catch (error) {
+        settleWithError(error instanceof Error ? error.message : "Invalid terminal frame.");
+        return;
+      }
+      if (frame.event === "terminal.opened") {
+        settled = true;
+        socket.close();
+        resolve(frame.payload.terminal);
+        return;
+      }
+      if (frame.event === "terminal.error") {
+        settleWithError(formatTerminalError(frame.payload));
+      }
+    };
+
+    socket.onerror = () => settleWithError("Terminal stream connection failed.");
+    socket.onclose = () => {
+      if (!settled) settleWithError("Terminal stream closed before terminal.opened.");
+    };
+  });
+}
+
+function formatTerminalError(error: { message: string; action?: string | null; detail?: string | null }) {
+  const parts = [error.message, error.action, error.detail].map((part) => part?.trim()).filter(Boolean);
+  return parts.join(" ");
+}
+
 function unique(values: string[]) {
   return Array.from(new Set(values)).sort((left, right) => left.localeCompare(right));
 }
 
-function sessionKey(session: SessionSummary) {
+function sessionKey(session: SessionRef) {
   return `${session.origin}:${session.provider}:${session.id}`;
+}
+
+function terminalsBySession(terminals: TerminalSessionSummary[]) {
+  const index = new Map<string, TerminalSessionSummary[]>();
+  for (const terminal of terminals) {
+    if (terminal.state === "Exited") continue;
+    const key = sessionKey(terminal.session);
+    const entries = index.get(key) ?? [];
+    entries.push(terminal);
+    index.set(key, entries);
+  }
+  return index;
+}
+
+function sameSessionRef(left: SessionRef, right: SessionRef) {
+  return left.origin === right.origin && left.provider === right.provider && left.id === right.id;
 }
 
 function terminalLiveHash(ref: SessionRef, terminalId: string) {
@@ -1292,21 +1574,23 @@ function terminalTone(state: TerminalSessionSummary["state"]): "info" | "success
 function pageCopy(view: View) {
   switch (view.name) {
     case "dashboard":
-      return { title: "Dashboard", subtitle: "Continue operational work" };
+      return { title: "Dashboard", subtitle: "Operational overview" };
     case "sessions":
       return { title: "Sessions", subtitle: "Browse normalized agent history" };
     case "origins":
-      return { title: "Origins", subtitle: "Configured remotes visible to this gateway" };
+      return { title: "Origins", subtitle: "Remote inventory" };
     case "terminals":
-      return { title: "Active Terminals", subtitle: "Daemon-owned runtime objects" };
+      return { title: "Active Terminals", subtitle: "Runtime registry" };
     case "terminalLive":
       return { title: "Terminal Runtime", subtitle: "Live daemon stream" };
+    case "share":
+      return { title: "Shared Session", subtitle: "Public read-only transcript" };
     case "profile":
-      return { title: "Profile", subtitle: "Developer identity, account security, and access tokens" };
+      return { title: "Profile", subtitle: "Identity and access" };
     case "settings":
-      return { title: "Settings", subtitle: "Preferences, runtime config, and access state" };
+      return { title: "Settings", subtitle: "Preferences and runtime" };
     case "detail":
-      return { title: "Session Detail", subtitle: "Read transcript and inspect runtime" };
+      return { title: "Session Detail", subtitle: "Transcript and runtime" };
   }
 }
 
@@ -1325,8 +1609,8 @@ function identityDisplay(accountState: AccountState) {
       detail: user.email
     };
   }
-  if (accountState.status === "legacy") {
-    return { initials: "lg", name: "Local gateway", detail: "legacy token mode" };
+  if (accountState.status === "error") {
+    return { initials: "cx", name: "Account unavailable", detail: accountState.error };
   }
   return { initials: "cx", name: "coca", detail: "checking identity" };
 }
@@ -1342,13 +1626,22 @@ function optionLabel(value: string) {
 function routeFromHash(): View {
   const rawHash = window.location.hash.replace(/^#\/?/, "");
   const [hash, query = ""] = rawHash.split("?");
-  if (!hash || hash === "dashboard") return { name: "dashboard" };
+  if (!hash) return { name: readLandingPage() === "sessions" ? "sessions" : readLandingPage() === "terminals" ? "terminals" : "dashboard" };
+  if (hash === "dashboard") return { name: "dashboard" };
   if (hash === "sessions") return { name: "sessions" };
   if (hash === "origins") return { name: "origins" };
   if (hash === "terminals") return { name: "terminals" };
   if (hash === "profile") return { name: "profile" };
   if (hash === "settings" || hash === "config") return { name: "settings" };
   const parts = hash.split("/");
+  if (parts[0] === "share" && parts.length === 2) {
+    const params = new URLSearchParams(query);
+    return {
+      name: "share",
+      linkId: decodeURIComponent(parts[1]),
+      shareToken: params.get("share_token") ?? ""
+    };
+  }
   if (parts[0] === "terminal" && parts.length === 5) {
     return {
       name: "terminalLive",
@@ -1394,6 +1687,32 @@ function readDensity(): Density {
   const stored = window.localStorage.getItem("coca-web-density");
   if (stored === "compact" || stored === "comfortable") return stored;
   return "normal";
+}
+
+function readBackground(): Background {
+  const stored = window.localStorage.getItem("coca-web-background");
+  return backgroundOptions.some((item) => item.id === stored) ? stored as Background : "porcelain";
+}
+
+function readTerminalTheme(): TerminalTheme {
+  const stored = window.localStorage.getItem("coca-web-terminal-theme");
+  return terminalThemes.some((item) => item.id === stored) ? stored as TerminalTheme : "one-half-dark";
+}
+
+function readTranscriptDefault(): TranscriptDefault {
+  const stored = window.localStorage.getItem("coca-web-transcript-default");
+  return stored === "raw" ? "raw" : "rendered";
+}
+
+function readLandingPage(): LandingPage {
+  const stored = window.localStorage.getItem("coca-web-landing-page");
+  if (stored === "sessions" || stored === "terminals") return stored;
+  return "dashboard";
+}
+
+function readTerminalBehavior(): TerminalBehavior {
+  const stored = window.localStorage.getItem("coca-web-terminal-behavior");
+  return stored === "ask-before-detach" ? "ask-before-detach" : "detach-confirm-kill";
 }
 
 function encodePart(value: string): string {

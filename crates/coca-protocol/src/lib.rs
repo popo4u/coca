@@ -32,6 +32,19 @@ pub mod methods {
     pub const ACCOUNT_TOKENS_LIST: &str = "account.tokens.list";
     pub const ACCOUNT_TOKENS_CREATE: &str = "account.tokens.create";
     pub const ACCOUNT_TOKENS_REVOKE: &str = "account.tokens.revoke";
+    pub const ACCOUNT_SHARE_LINKS_LIST: &str = "account.share_links.list";
+    pub const ACCOUNT_SHARE_LINKS_REVOKE: &str = "account.share_links.revoke";
+    pub const SHARE_PUBLIC_DETAIL: &str = "share.public.detail";
+}
+
+pub mod auth_scopes {
+    pub const SESSIONS_READ: &str = "sessions.read";
+    pub const SHARE_MANAGE: &str = "share.manage";
+    pub const ACCOUNT_MANAGE: &str = "account.manage";
+    pub const TOKENS_MANAGE: &str = "tokens.manage";
+    pub const TERMINAL_READ: &str = "terminal.read";
+    pub const TERMINAL_WRITE: &str = "terminal.write";
+    pub const TERMINAL_KILL: &str = "terminal.kill";
 }
 
 pub mod terminal_events {
@@ -244,7 +257,6 @@ pub struct AuthSignupParams {
     pub password: String,
     pub display_name: Option<String>,
     pub device_label: Option<String>,
-    pub bootstrap_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -285,12 +297,26 @@ pub struct AccountDevicesRevokeParams {
 pub struct AccountTokensCreateParams {
     pub user_id: String,
     pub name: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AccountTokensRevokeParams {
     pub user_id: String,
     pub token_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccountShareLinksRevokeParams {
+    pub user_id: String,
+    pub link_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PublicShareDetailParams {
+    pub link_id: String,
+    pub token: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -530,6 +556,15 @@ mod tests {
         assert_eq!(methods::ACCOUNT_TOKENS_LIST, "account.tokens.list");
         assert_eq!(methods::ACCOUNT_TOKENS_CREATE, "account.tokens.create");
         assert_eq!(methods::ACCOUNT_TOKENS_REVOKE, "account.tokens.revoke");
+        assert_eq!(
+            methods::ACCOUNT_SHARE_LINKS_LIST,
+            "account.share_links.list"
+        );
+        assert_eq!(
+            methods::ACCOUNT_SHARE_LINKS_REVOKE,
+            "account.share_links.revoke"
+        );
+        assert_eq!(methods::SHARE_PUBLIC_DETAIL, "share.public.detail");
     }
 
     #[test]
@@ -539,12 +574,38 @@ mod tests {
             password: "password".to_string(),
             display_name: Some("User".to_string()),
             device_label: Some("Browser".to_string()),
-            bootstrap_token: Some("bootstrap".to_string()),
         };
 
         let json = serde_json::to_string(&params).unwrap();
         let decoded: AuthSignupParams = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, params);
+    }
+
+    #[test]
+    fn auth_scopes_and_share_params_roundtrip() {
+        let params = AccountTokensCreateParams {
+            user_id: "usr_1".to_string(),
+            name: "CI".to_string(),
+            scopes: vec![
+                auth_scopes::SESSIONS_READ.to_string(),
+                auth_scopes::TERMINAL_READ.to_string(),
+            ],
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        let decoded: AccountTokensCreateParams = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, params);
+        assert!(json.contains("sessions.read"));
+        assert!(json.contains("terminal.read"));
+
+        let share = PublicShareDetailParams {
+            link_id: "shr_1".to_string(),
+            token: "coca_share_secret".to_string(),
+        };
+        let json = serde_json::to_string(&share).unwrap();
+        let decoded: PublicShareDetailParams = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, share);
     }
 }

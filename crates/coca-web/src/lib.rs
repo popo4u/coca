@@ -7,14 +7,14 @@ use std::thread;
 
 use anyhow::{Context, Result};
 use base64::prelude::{Engine as _, BASE64_STANDARD};
-use coca_app::{AuthValidation, StreamInfo};
+use coca_app::StreamInfo;
 use coca_protocol::{
     methods, AccountDevicesRevokeParams, AccountPasswordUpdateParams, AccountProfileUpdateParams,
-    AccountSubjectParams, AccountTokensCreateParams, AccountTokensRevokeParams,
-    AiSettingsUpdateParams, AuthLoginParams, AuthLogoutParams, AuthSignupParams,
-    AuthValidateParams, DaemonPingResult, JsonRpcRequest, RpcError, RpcId, SessionGetParams,
-    SessionRef, SettingsSummaryParams, ShareUrlParams, TerminalClientFrame, TerminalError,
-    TerminalListResult, TerminalServerFrame,
+    AccountShareLinksRevokeParams, AccountSubjectParams, AccountTokensCreateParams,
+    AccountTokensRevokeParams, AiSettingsUpdateParams, AuthLoginParams, AuthLogoutParams,
+    AuthSignupParams, AuthValidateParams, DaemonPingResult, JsonRpcRequest,
+    PublicShareDetailParams, RpcError, RpcId, SessionGetParams, SessionRef, SettingsSummaryParams,
+    TerminalClientFrame, TerminalError, TerminalListResult, TerminalServerFrame,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -23,10 +23,8 @@ use sha1::{Digest, Sha1};
 #[derive(Clone, Debug)]
 pub struct GatewayOptions {
     pub bind: String,
-    pub read_token: String,
     pub share_base_url: String,
     pub terminal_enabled: bool,
-    pub terminal_token: String,
     pub static_dir: PathBuf,
     pub daemon_socket: Option<PathBuf>,
     pub terminal_socket: Option<PathBuf>,
@@ -34,12 +32,15 @@ pub struct GatewayOptions {
 
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const MAX_WEBSOCKET_PAYLOAD_LEN: u64 = coca_ipc::MAX_FRAME_LEN as u64;
+const SESSIONS_READ_SCOPE: &str = "sessions.read";
+const SHARE_MANAGE_SCOPE: &str = "share.manage";
+const ACCOUNT_MANAGE_SCOPE: &str = "account.manage";
+const TOKENS_MANAGE_SCOPE: &str = "tokens.manage";
+const TERMINAL_READ_SCOPE: &str = "terminal.read";
+const TERMINAL_WRITE_SCOPE: &str = "terminal.write";
+const TERMINAL_KILL_SCOPE: &str = "terminal.kill";
 
 pub fn serve(options: GatewayOptions) -> Result<()> {
-    if options.read_token.trim().is_empty() {
-        anyhow::bail!("gateway API token must not be empty");
-    }
-
     let listener = TcpListener::bind(options.bind.trim())
         .with_context(|| format!("failed to bind gateway {}", options.bind))?;
     print_startup_info(&options, listener.local_addr()?);
@@ -60,7 +61,6 @@ struct GatewayStartupInfo {
     listen_addr: String,
     browser_url: String,
     share_base_url: String,
-    token: String,
 }
 
 fn print_startup_info(options: &GatewayOptions, listen_addr: SocketAddr) {
@@ -70,21 +70,14 @@ fn print_startup_info(options: &GatewayOptions, listen_addr: SocketAddr) {
     let _ = writeln!(stdout, "  address: {}", info.listen_addr);
     let _ = writeln!(stdout, "  browser: {}", info.browser_url);
     let _ = writeln!(stdout, "  share base_url: {}", info.share_base_url);
-    let _ = writeln!(stdout, "  token: {}", info.token);
     let _ = stdout.flush();
 }
 
 fn startup_info(options: &GatewayOptions, listen_addr: SocketAddr) -> GatewayStartupInfo {
-    let token = options.read_token.trim().to_string();
     GatewayStartupInfo {
         listen_addr: listen_addr.to_string(),
-        browser_url: format!(
-            "{}/?token={}",
-            local_gateway_base_url(listen_addr),
-            percent_encode_query_value(&token)
-        ),
+        browser_url: local_gateway_base_url(listen_addr),
         share_base_url: options.share_base_url.trim().to_string(),
-        token,
     }
 }
 
@@ -96,19 +89,6 @@ fn local_gateway_base_url(addr: SocketAddr) -> String {
         IpAddr::V6(ip) => format!("[{ip}]"),
     };
     format!("http://{host}:{}", addr.port())
-}
-
-fn percent_encode_query_value(value: &str) -> String {
-    let mut encoded = String::new();
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(byte as char);
-            }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    encoded
 }
 
 fn handle_stream(stream: TcpStream, options: GatewayOptions) -> Result<()> {
@@ -132,6 +112,24 @@ fn route_request(request: &Request, options: &GatewayOptions) -> Response {
 }
 
 fn route_api(request: &Request, options: &GatewayOptions) -> Response {
+    if let Some(link_id) = public_share_link_id(request) {
+        let Some(token) = request
+            .query_param("share_token")
+            .and_then(|value| percent_decode(&value))
+        else {
+            return Response::text(401, "Unauthorized", "unauthorized");
+        };
+        return match daemon_rpc::<Option<Value>>(
+            options,
+            methods::SHARE_PUBLIC_DETAIL,
+            Some(rpc_params(PublicShareDetailParams { link_id, token })),
+        ) {
+            Ok(Some(value)) => json_response(value),
+            Ok(None) => Response::text(404, "Not Found", "share link not found"),
+            Err(error) => daemon_error_response(error),
+        };
+    }
+
     let auth = if is_public_auth_route(request) {
         None
     } else {
@@ -179,6 +177,9 @@ fn route_api(request: &Request, options: &GatewayOptions) -> Response {
             ))
         }
         ("GET", "/api/v1/account/me") => {
+            if let Some(response) = reject_scope(auth.as_ref(), ACCOUNT_MANAGE_SCOPE) {
+                return response;
+            }
             let Some(user_id) = user_id(&auth) else {
                 return Response::text(401, "Unauthorized", "unauthorized");
             };
@@ -189,6 +190,9 @@ fn route_api(request: &Request, options: &GatewayOptions) -> Response {
             ))
         }
         ("PATCH", "/api/v1/account/profile") => {
+            if let Some(response) = reject_scope(auth.as_ref(), ACCOUNT_MANAGE_SCOPE) {
+                return response;
+            }
             let Some(user_id) = user_id(&auth) else {
                 return Response::text(401, "Unauthorized", "unauthorized");
             };
@@ -205,6 +209,9 @@ fn route_api(request: &Request, options: &GatewayOptions) -> Response {
             ))
         }
         ("POST", "/api/v1/account/password") => {
+            if let Some(response) = reject_scope(auth.as_ref(), ACCOUNT_MANAGE_SCOPE) {
+                return response;
+            }
             let Some(user_id) = user_id(&auth) else {
                 return Response::text(401, "Unauthorized", "unauthorized");
             };
@@ -222,6 +229,9 @@ fn route_api(request: &Request, options: &GatewayOptions) -> Response {
             ))
         }
         ("GET", "/api/v1/account/devices") => {
+            if let Some(response) = reject_scope(auth.as_ref(), ACCOUNT_MANAGE_SCOPE) {
+                return response;
+            }
             let Some(user_id) = user_id(&auth) else {
                 return Response::text(401, "Unauthorized", "unauthorized");
             };
@@ -232,6 +242,9 @@ fn route_api(request: &Request, options: &GatewayOptions) -> Response {
             ))
         }
         ("POST", "/api/v1/account/devices/revoke") => {
+            if let Some(response) = reject_scope(auth.as_ref(), ACCOUNT_MANAGE_SCOPE) {
+                return response;
+            }
             let Some(user_id) = user_id(&auth) else {
                 return Response::text(401, "Unauthorized", "unauthorized");
             };
@@ -248,6 +261,9 @@ fn route_api(request: &Request, options: &GatewayOptions) -> Response {
             ))
         }
         ("GET", "/api/v1/account/tokens") => {
+            if let Some(response) = reject_scope(auth.as_ref(), TOKENS_MANAGE_SCOPE) {
+                return response;
+            }
             let Some(user_id) = user_id(&auth) else {
                 return Response::text(401, "Unauthorized", "unauthorized");
             };
@@ -258,6 +274,9 @@ fn route_api(request: &Request, options: &GatewayOptions) -> Response {
             ))
         }
         ("POST", "/api/v1/account/tokens") => {
+            if let Some(response) = reject_scope(auth.as_ref(), TOKENS_MANAGE_SCOPE) {
+                return response;
+            }
             let Some(user_id) = user_id(&auth) else {
                 return Response::text(401, "Unauthorized", "unauthorized");
             };
@@ -270,10 +289,14 @@ fn route_api(request: &Request, options: &GatewayOptions) -> Response {
                 Some(rpc_params(AccountTokensCreateParams {
                     user_id,
                     name: body.name,
+                    scopes: body.scopes,
                 })),
             ))
         }
         ("POST", "/api/v1/account/tokens/revoke") => {
+            if let Some(response) = reject_scope(auth.as_ref(), TOKENS_MANAGE_SCOPE) {
+                return response;
+            }
             let Some(user_id) = user_id(&auth) else {
                 return Response::text(401, "Unauthorized", "unauthorized");
             };
@@ -289,13 +312,58 @@ fn route_api(request: &Request, options: &GatewayOptions) -> Response {
                 })),
             ))
         }
-        ("GET", "/api/v1/sessions") => daemon_json_response(daemon_rpc::<Value>(
-            options,
-            methods::SESSIONS_SUMMARIES,
-            None,
-        )),
-        ("GET", "/api/sessions") => daemon_json_response(legacy_sessions(options)),
+        ("GET", "/api/v1/account/share-links") => {
+            if let Some(response) = reject_scope(auth.as_ref(), SHARE_MANAGE_SCOPE) {
+                return response;
+            }
+            let Some(user_id) = user_id(&auth) else {
+                return Response::text(401, "Unauthorized", "unauthorized");
+            };
+            daemon_json_response(daemon_rpc::<Value>(
+                options,
+                methods::ACCOUNT_SHARE_LINKS_LIST,
+                Some(rpc_params(AccountSubjectParams { user_id })),
+            ))
+        }
+        ("POST", "/api/v1/account/share-links/revoke") => {
+            if let Some(response) = reject_scope(auth.as_ref(), SHARE_MANAGE_SCOPE) {
+                return response;
+            }
+            let Some(user_id) = user_id(&auth) else {
+                return Response::text(401, "Unauthorized", "unauthorized");
+            };
+            let Ok(body) = serde_json::from_slice::<ShareLinkRevokeBody>(&request.body) else {
+                return Response::text(400, "Bad Request", "invalid share link revoke payload");
+            };
+            daemon_json_response(daemon_rpc::<Value>(
+                options,
+                methods::ACCOUNT_SHARE_LINKS_REVOKE,
+                Some(rpc_params(AccountShareLinksRevokeParams {
+                    user_id,
+                    link_id: body.link_id,
+                })),
+            ))
+        }
+        ("GET", "/api/v1/sessions") => {
+            if let Some(response) = reject_scope(auth.as_ref(), SESSIONS_READ_SCOPE) {
+                return response;
+            }
+            daemon_json_response(daemon_rpc::<Value>(
+                options,
+                methods::SESSIONS_SUMMARIES,
+                None,
+            ))
+        }
+        ("GET", "/api/sessions") => {
+            if let Some(response) = reject_scope(auth.as_ref(), SESSIONS_READ_SCOPE) {
+                return response;
+            }
+            daemon_json_response(legacy_sessions(options))
+        }
         ("GET", "/api/v1/session") => {
+            if let Some(response) = reject_scope(auth.as_ref(), SESSIONS_READ_SCOPE) {
+                return response;
+            }
             let Some(reference) = session_ref_from_query(request) else {
                 return Response::text(400, "Bad Request", "missing session reference");
             };
@@ -314,12 +382,17 @@ fn route_api(request: &Request, options: &GatewayOptions) -> Response {
             })),
         )),
         ("GET", "/api/v1/terminal/sessions") => {
-            if let Some(response) = reject_terminal_token_request(request, options) {
+            if let Some(response) =
+                reject_terminal_request(auth.as_ref(), options, TERMINAL_READ_SCOPE)
+            {
                 return response;
             }
             daemon_json_response(terminal_sessions(options))
         }
         ("PUT", "/api/v1/config/ai") => {
+            if let Some(response) = reject_scope(auth.as_ref(), ACCOUNT_MANAGE_SCOPE) {
+                return response;
+            }
             let Ok(body) = serde_json::from_slice::<AiSettingsUpdateParams>(&request.body) else {
                 return Response::text(400, "Bad Request", "invalid ai config payload");
             };
@@ -330,14 +403,21 @@ fn route_api(request: &Request, options: &GatewayOptions) -> Response {
             ))
         }
         ("POST", "/api/v1/share-session") => {
+            if let Some(response) = reject_scope(auth.as_ref(), SHARE_MANAGE_SCOPE) {
+                return response;
+            }
+            let Some(user_id) = user_id(&auth) else {
+                return Response::text(401, "Unauthorized", "unauthorized");
+            };
             let Ok(body) = serde_json::from_slice::<ShareSessionRequest>(&request.body) else {
                 return Response::text(400, "Bad Request", "invalid share-session payload");
             };
             daemon_json_response(daemon_rpc::<Value>(
                 options,
                 methods::SHARE_URL,
-                Some(rpc_params(ShareUrlParams {
-                    session: body.session,
+                Some(json!({
+                    "session": body.session,
+                    "user_id": user_id,
                 })),
             ))
         }
@@ -359,6 +439,8 @@ fn route_api(request: &Request, options: &GatewayOptions) -> Response {
         | (_, "/api/v1/account/devices/revoke")
         | (_, "/api/v1/account/tokens")
         | (_, "/api/v1/account/tokens/revoke")
+        | (_, "/api/v1/account/share-links")
+        | (_, "/api/v1/account/share-links/revoke")
         | (_, "/api/v1/sessions")
         | (_, "/api/sessions")
         | (_, "/api/v1/session")
@@ -454,8 +536,37 @@ fn file_response(path: &Path) -> Response {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ApiAuth {
-    LegacyShare,
-    Account { token: String, user_id: String },
+    Account {
+        token: String,
+        user_id: String,
+        scopes: Vec<String>,
+    },
+}
+
+impl ApiAuth {
+    fn has_scope(&self, scope: &str) -> bool {
+        match self {
+            Self::Account { scopes, .. } => scopes.iter().any(|candidate| candidate == scope),
+        }
+    }
+
+    fn has_any_terminal_scope(&self) -> bool {
+        self.has_scope(TERMINAL_READ_SCOPE)
+            || self.has_scope(TERMINAL_WRITE_SCOPE)
+            || self.has_scope(TERMINAL_KILL_SCOPE)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountAuthValidation {
+    user: AccountAuthUser,
+    #[serde(default)]
+    scopes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountAuthUser {
+    id: String,
 }
 
 fn is_public_auth_route(request: &Request) -> bool {
@@ -469,13 +580,17 @@ fn authenticate_api_request(
     request: &Request,
     options: &GatewayOptions,
 ) -> std::result::Result<ApiAuth, Response> {
-    let Some(token) = request.read_token() else {
+    let Some(token) = request.bearer_token() else {
         return Err(Response::text(401, "Unauthorized", "unauthorized"));
     };
-    if token == options.read_token.trim() {
-        return Ok(ApiAuth::LegacyShare);
-    }
-    match daemon_rpc::<Option<AuthValidation>>(
+    authenticate_account_token(token, options)
+}
+
+fn authenticate_account_token(
+    token: String,
+    options: &GatewayOptions,
+) -> std::result::Result<ApiAuth, Response> {
+    match daemon_rpc::<Option<AccountAuthValidation>>(
         options,
         methods::AUTH_VALIDATE,
         Some(rpc_params(AuthValidateParams {
@@ -485,6 +600,7 @@ fn authenticate_api_request(
         Ok(Some(validation)) => Ok(ApiAuth::Account {
             token,
             user_id: validation.user.id,
+            scopes: validation.scopes,
         }),
         Ok(None) => Err(Response::text(401, "Unauthorized", "unauthorized")),
         Err(error) => Err(daemon_error_response(error)),
@@ -505,13 +621,23 @@ fn user_auth_token(auth: &Option<ApiAuth>) -> Option<String> {
     }
 }
 
-fn reject_terminal_token_request(request: &Request, options: &GatewayOptions) -> Option<Response> {
+fn reject_terminal_request(
+    auth: Option<&ApiAuth>,
+    options: &GatewayOptions,
+    scope: &str,
+) -> Option<Response> {
     if !options.terminal_enabled {
         return Some(Response::text(403, "Forbidden", "terminal disabled"));
     }
-    let expected = options.terminal_token.trim();
-    if expected.is_empty() || request.terminal_token().as_deref() != Some(expected) {
-        return Some(Response::text(403, "Forbidden", "terminal unauthorized"));
+    reject_scope(auth, scope)
+}
+
+fn reject_scope(auth: Option<&ApiAuth>, scope: &str) -> Option<Response> {
+    let Some(auth) = auth else {
+        return Some(Response::text(401, "Unauthorized", "unauthorized"));
+    };
+    if !auth.has_scope(scope) {
+        return Some(Response::text(403, "Forbidden", "insufficient scope"));
     }
     None
 }
@@ -685,9 +811,10 @@ fn handle_terminal_websocket(
     request: Request,
     options: GatewayOptions,
 ) -> Result<()> {
-    if let Some(response) = reject_terminal_websocket_request(&request, &options) {
-        return write_response(reader.get_mut(), &response);
-    }
+    let auth = match authorize_terminal_websocket_request(&request, &options) {
+        Ok(auth) => auth,
+        Err(response) => return write_response(reader.get_mut(), &response),
+    };
 
     let Some(key) = request.header("sec-websocket-key").map(str::trim) else {
         return write_response(
@@ -707,32 +834,44 @@ fn handle_terminal_websocket(
             }
         };
         write_websocket_upgrade(reader.get_mut(), key)?;
-        bridge_terminal_websocket(reader, daemon)
+        bridge_terminal_websocket(reader, daemon, auth)
     }
 
     #[cfg(not(unix))]
     {
         write_websocket_upgrade(reader.get_mut(), key)?;
-        bridge_terminal_websocket(reader, terminal_socket)
+        bridge_terminal_websocket(reader, terminal_socket, auth)
     }
 }
 
+#[cfg(test)]
 fn reject_terminal_websocket_request(
     request: &Request,
     options: &GatewayOptions,
 ) -> Option<Response> {
+    authorize_terminal_websocket_request(request, options).err()
+}
+
+fn authorize_terminal_websocket_request(
+    request: &Request,
+    options: &GatewayOptions,
+) -> std::result::Result<ApiAuth, Response> {
     if request.method != "GET" {
-        return Some(Response::text(
+        return Err(Response::text(
             405,
             "Method Not Allowed",
             "method not allowed",
         ));
     }
-    if let Err(response) = authenticate_api_request(request, options) {
-        return Some(response);
+    let Some(token) = request.websocket_account_token() else {
+        return Err(Response::text(401, "Unauthorized", "unauthorized"));
+    };
+    let auth = authenticate_account_token(token, options)?;
+    if !options.terminal_enabled {
+        return Err(Response::text(403, "Forbidden", "terminal disabled"));
     }
-    if let Some(response) = reject_terminal_token_request(request, options) {
-        return Some(response);
+    if !auth.has_any_terminal_scope() {
+        return Err(Response::text(403, "Forbidden", "terminal unauthorized"));
     }
     if !header_contains_token(request.header("connection"), "upgrade")
         || !request
@@ -741,13 +880,33 @@ fn reject_terminal_websocket_request(
             .unwrap_or(false)
         || request.header("sec-websocket-version") != Some("13")
     {
-        return Some(Response::text(
+        return Err(Response::text(
             426,
             "Upgrade Required",
             "websocket upgrade required",
         ));
     }
-    None
+    Ok(auth)
+}
+
+fn missing_terminal_frame_scope(
+    auth: &ApiAuth,
+    frame: &TerminalClientFrame,
+) -> Option<&'static str> {
+    let scope = terminal_frame_required_scope(frame);
+    (!auth.has_scope(scope)).then_some(scope)
+}
+
+fn terminal_frame_required_scope(frame: &TerminalClientFrame) -> &'static str {
+    match frame {
+        TerminalClientFrame::Attach(_) => TERMINAL_READ_SCOPE,
+        TerminalClientFrame::Open(_)
+        | TerminalClientFrame::Input(_)
+        | TerminalClientFrame::Resize(_)
+        | TerminalClientFrame::Detach(_) => TERMINAL_WRITE_SCOPE,
+        TerminalClientFrame::Close(request) if request.kill => TERMINAL_KILL_SCOPE,
+        TerminalClientFrame::Close(_) => TERMINAL_WRITE_SCOPE,
+    }
 }
 
 fn terminal_socket_path(options: &GatewayOptions) -> Result<PathBuf> {
@@ -802,6 +961,7 @@ fn connect_terminal_daemon(terminal_socket: &Path) -> Result<std::os::unix::net:
 fn bridge_terminal_websocket(
     mut websocket_reader: BufReader<TcpStream>,
     daemon: std::os::unix::net::UnixStream,
+    auth: ApiAuth,
 ) -> Result<()> {
     use std::net::Shutdown;
 
@@ -857,6 +1017,14 @@ fn bridge_terminal_websocket(
                             continue;
                         }
                     };
+                if let Some(scope) = missing_terminal_frame_scope(&auth, &terminal_frame) {
+                    write_ws_error(
+                        &websocket_writer,
+                        "terminal_unauthorized",
+                        format!("terminal scope required: {scope}"),
+                    )?;
+                    continue;
+                }
                 coca_ipc::write_json_frame(&mut daemon_writer, &terminal_frame)
                     .context("failed to write terminal daemon frame")?;
             }
@@ -881,6 +1049,7 @@ fn bridge_terminal_websocket(
 fn bridge_terminal_websocket(
     mut websocket_reader: BufReader<TcpStream>,
     _terminal_socket: PathBuf,
+    _auth: ApiAuth,
 ) -> Result<()> {
     write_ws_frame(
         websocket_reader.get_mut(),
@@ -901,13 +1070,13 @@ fn bridge_terminal_websocket(
 fn write_ws_error(
     websocket_writer: &Arc<Mutex<TcpStream>>,
     code: &str,
-    message: &str,
+    message: impl Into<String>,
 ) -> Result<()> {
     let frame = TerminalServerFrame::Error(TerminalError {
         request_id: None,
         terminal_id: None,
         code: code.to_string(),
-        message: message.to_string(),
+        message: message.into(),
         action: Some("Send a valid terminal WebSocket frame and retry.".to_string()),
         detail: None,
     });
@@ -1096,6 +1265,17 @@ fn session_ref_from_query(request: &Request) -> Option<SessionRef> {
     })
 }
 
+fn public_share_link_id(request: &Request) -> Option<String> {
+    if request.method != "GET" {
+        return None;
+    }
+    request
+        .path()
+        .strip_prefix("/api/v1/share/")
+        .and_then(|id| (!id.trim().is_empty()).then_some(id))
+        .and_then(percent_decode)
+}
+
 #[derive(Debug, Deserialize)]
 struct ShareSessionRequest {
     session: SessionRef,
@@ -1120,11 +1300,18 @@ struct DeviceRevokeBody {
 #[derive(Debug, Deserialize)]
 struct AccessTokenCreateBody {
     name: String,
+    #[serde(default)]
+    scopes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct AccessTokenRevokeBody {
     token_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ShareLinkRevokeBody {
+    link_id: String,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1172,16 +1359,9 @@ impl Request {
             .map(str::to_string)
     }
 
-    fn read_token(&self) -> Option<String> {
+    fn websocket_account_token(&self) -> Option<String> {
         self.bearer_token()
             .or_else(|| self.decoded_query_param("token"))
-    }
-
-    fn terminal_token(&self) -> Option<String> {
-        self.header("x-coca-terminal-token")
-            .map(str::trim)
-            .map(str::to_string)
-            .or_else(|| self.decoded_query_param("terminal_token"))
     }
 
     fn content_length(&self) -> Option<usize> {
@@ -1368,12 +1548,42 @@ mod tests {
     }
 
     #[test]
-    fn health_reports_stream_protocol() {
+    fn query_token_does_not_authorize_normal_api() {
         let options = gateway_options();
         let request = Request {
             method: "GET".to_string(),
-            target: "/api/v1/health?token=secret".to_string(),
+            target: "/api/v1/sessions?token=secret".to_string(),
             headers: Vec::new(),
+            body: Vec::new(),
+        };
+
+        let response = route_request(&request, &options);
+
+        assert_eq!(response.status, 401);
+    }
+
+    #[test]
+    fn health_reports_stream_protocol() {
+        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_n(2, |idx, request| match idx {
+            0 => {
+                assert_eq!(request.method, methods::AUTH_VALIDATE);
+                JsonRpcResponse::success(request.id, auth_validation_json())
+            }
+            1 => {
+                assert_eq!(request.method, methods::DAEMON_PING);
+                JsonRpcResponse::success(
+                    request.id,
+                    serde_json::to_value(DaemonPingResult::default()).unwrap(),
+                )
+            }
+            _ => unreachable!(),
+        });
+        let mut options = gateway_options();
+        options.daemon_socket = Some(daemon_socket);
+        let request = Request {
+            method: "GET".to_string(),
+            target: "/api/v1/health".to_string(),
+            headers: account_headers(),
             body: Vec::new(),
         };
 
@@ -1382,10 +1592,11 @@ mod tests {
 
         assert_eq!(response.status, 200);
         assert!(body.contains("\"service\":\"coca-gateway\""));
-        assert!(body.contains("\"ready\":false"));
-        assert!(body.contains("\"code\":\"daemon_unavailable\""));
+        assert!(body.contains("\"ready\":true"));
+        assert!(body.contains("\"protocol_version\""));
         assert!(body.contains("terminal.open"));
         assert!(body.contains("terminal.output"));
+        daemon_handle.join().unwrap();
     }
 
     #[test]
@@ -1393,8 +1604,8 @@ mod tests {
         let options = gateway_options();
         let request = Request {
             method: "GET".to_string(),
-            target: "/api/sessions?token=secret".to_string(),
-            headers: Vec::new(),
+            target: "/api/sessions".to_string(),
+            headers: account_headers(),
             body: Vec::new(),
         };
 
@@ -1409,38 +1620,45 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn api_sessions_compatibility_is_loaded_from_daemon_rpc() {
-        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_once(|request| {
-            assert_eq!(request.method, methods::SESSIONS_LIST);
-            JsonRpcResponse::success(
-                request.id,
-                serde_json::json!({
-                    "sessions": [
-                        {
-                            "origin": "Local",
-                            "provider": "Codex",
-                            "id": "sid",
-                            "title": "title",
-                            "cwd": "/tmp",
-                            "created_at_ms": null,
-                            "updated_at_ms": null,
-                            "model": null,
-                            "source_path": "/tmp/session",
-                            "first_user_message": null,
-                            "transcript": [],
-                            "resume_program": "codex",
-                            "resume_args": ["resume", "sid"]
-                        }
-                    ],
-                    "warnings": []
-                }),
-            )
+        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_n(2, |idx, request| match idx {
+            0 => {
+                assert_eq!(request.method, methods::AUTH_VALIDATE);
+                JsonRpcResponse::success(request.id, auth_validation_json())
+            }
+            1 => {
+                assert_eq!(request.method, methods::SESSIONS_LIST);
+                JsonRpcResponse::success(
+                    request.id,
+                    serde_json::json!({
+                        "sessions": [
+                            {
+                                "origin": "Local",
+                                "provider": "Codex",
+                                "id": "sid",
+                                "title": "title",
+                                "cwd": "/tmp",
+                                "created_at_ms": null,
+                                "updated_at_ms": null,
+                                "model": null,
+                                "source_path": "/tmp/session",
+                                "first_user_message": null,
+                                "transcript": [],
+                                "resume_program": "codex",
+                                "resume_args": ["resume", "sid"]
+                            }
+                        ],
+                        "warnings": []
+                    }),
+                )
+            }
+            _ => unreachable!(),
         });
         let mut options = gateway_options();
         options.daemon_socket = Some(daemon_socket);
         let request = Request {
             method: "GET".to_string(),
-            target: "/api/sessions?token=secret".to_string(),
-            headers: Vec::new(),
+            target: "/api/sessions".to_string(),
+            headers: account_headers(),
             body: Vec::new(),
         };
 
@@ -1467,7 +1685,6 @@ mod tests {
                         "reason": null
                     },
                     "signup_enabled": true,
-                    "signup_requires_bootstrap_token": true,
                     "sso": [{
                         "provider": "oidc",
                         "available": false,
@@ -1666,78 +1883,47 @@ mod tests {
     }
 
     #[test]
-    fn terminal_websocket_requires_read_and_terminal_tokens() {
+    fn terminal_websocket_query_token_uses_daemon_account_validation() {
         let mut options = gateway_options();
         options.terminal_enabled = true;
-        options.terminal_token = "terminal-secret".to_string();
 
-        let missing_terminal = terminal_upgrade_request(
+        let request = terminal_upgrade_request(
             "/api/v1/terminal/ws?token=secret",
             "dGhlIHNhbXBsZSBub25jZQ==",
         );
-        let bad_read = terminal_upgrade_request(
-            "/api/v1/terminal/ws?token=bad&terminal_token=terminal-secret",
-            "dGhlIHNhbXBsZSBub25jZQ==",
-        );
-        let accepted = terminal_upgrade_request(
-            "/api/v1/terminal/ws?token=secret&terminal_token=terminal-secret",
-            "dGhlIHNhbXBsZSBub25jZQ==",
-        );
 
         assert_eq!(
-            reject_terminal_websocket_request(&missing_terminal, &options)
-                .unwrap()
-                .status,
-            403
-        );
-        assert_eq!(
-            reject_terminal_websocket_request(&bad_read, &options)
+            reject_terminal_websocket_request(&request, &options)
                 .unwrap()
                 .status,
             503
         );
-        assert!(reject_terminal_websocket_request(&accepted, &options).is_none());
     }
 
     #[test]
-    fn terminal_sessions_requires_read_and_terminal_tokens() {
+    fn terminal_sessions_ignore_query_token() {
         let mut options = gateway_options();
         options.terminal_enabled = true;
-        options.terminal_token = "terminal-secret".to_string();
 
-        let missing_read = Request {
-            method: "GET".to_string(),
-            target: "/api/v1/terminal/sessions".to_string(),
-            headers: vec![(
-                "x-coca-terminal-token".to_string(),
-                "terminal-secret".to_string(),
-            )],
-            body: Vec::new(),
-        };
-        let missing_terminal = Request {
+        let request = Request {
             method: "GET".to_string(),
             target: "/api/v1/terminal/sessions?token=secret".to_string(),
             headers: Vec::new(),
             body: Vec::new(),
         };
 
-        assert_eq!(route_request(&missing_read, &options).status, 401);
-        assert_eq!(route_request(&missing_terminal, &options).status, 403);
+        assert_eq!(route_request(&request, &options).status, 401);
     }
 
     #[test]
     fn terminal_sessions_returns_structured_daemon_unavailable() {
         let mut options = gateway_options();
         options.terminal_enabled = true;
-        options.terminal_token = "terminal-secret".to_string();
         options.daemon_socket = Some(PathBuf::from("__missing_daemon.sock"));
         let request = Request {
             method: "GET".to_string(),
-            target: "/api/v1/terminal/sessions?token=secret".to_string(),
-            headers: vec![(
-                "x-coca-terminal-token".to_string(),
-                "terminal-secret".to_string(),
-            )],
+            target: "/api/v1/terminal/sessions".to_string(),
+            headers: account_headers(),
             body: Vec::new(),
         };
 
@@ -1753,43 +1939,49 @@ mod tests {
     #[test]
     fn config_summary_does_not_expose_terminal_tokens() {
         let mut options = gateway_options();
-        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_once(|request| {
-            assert_eq!(request.method, methods::SETTINGS_SUMMARY);
-            let params: SettingsSummaryParams =
-                serde_json::from_value(request.params.unwrap()).unwrap();
-            assert_eq!(params.gateway_bind, "127.0.0.1:0");
-            assert!(!params.terminal_socket_available);
-            JsonRpcResponse::success(
-                request.id,
-                serde_json::json!({
-                    "terminal": {
-                        "enabled": true,
-                        "token_configured": true,
-                        "daemon_available": true,
-                        "terminal_socket_available": false,
-                        "unavailable_code": "terminal_socket_unavailable",
-                        "unavailable_message": "coca daemon terminal socket is not available."
-                    },
-                    "remotes": [{
-                        "name": "remote-a",
-                        "base_url": "https://remote.example",
-                        "enabled": true,
-                        "visible": true,
-                        "token_configured": true,
-                        "terminal_token_configured": true,
-                        "terminal_ready": true,
-                        "terminal_unavailable_code": null,
-                        "terminal_unavailable_message": null,
-                        "session_count": 0
-                    }]
-                }),
-            )
+        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_n(2, |idx, request| match idx {
+            0 => {
+                assert_eq!(request.method, methods::AUTH_VALIDATE);
+                JsonRpcResponse::success(request.id, auth_validation_json())
+            }
+            1 => {
+                assert_eq!(request.method, methods::SETTINGS_SUMMARY);
+                let params: SettingsSummaryParams =
+                    serde_json::from_value(request.params.unwrap()).unwrap();
+                assert_eq!(params.gateway_bind, "127.0.0.1:0");
+                assert!(!params.terminal_socket_available);
+                JsonRpcResponse::success(
+                    request.id,
+                    serde_json::json!({
+                        "terminal": {
+                            "enabled": true,
+                            "daemon_available": true,
+                            "terminal_socket_available": false,
+                            "unavailable_code": "terminal_socket_unavailable",
+                            "unavailable_message": "coca daemon terminal socket is not available."
+                        },
+                        "remotes": [{
+                            "name": "remote-a",
+                            "base_url": "https://remote.example",
+                            "enabled": true,
+                            "visible": true,
+                            "token_configured": true,
+                            "terminal_token_configured": true,
+                            "terminal_ready": true,
+                            "terminal_unavailable_code": null,
+                            "terminal_unavailable_message": null,
+                            "session_count": 0
+                        }]
+                    }),
+                )
+            }
+            _ => unreachable!(),
         });
         options.daemon_socket = Some(daemon_socket);
         let request = Request {
             method: "GET".to_string(),
-            target: "/api/v1/config/summary?token=secret".to_string(),
-            headers: Vec::new(),
+            target: "/api/v1/config/summary".to_string(),
+            headers: account_headers(),
             body: Vec::new(),
         };
 
@@ -1799,6 +1991,7 @@ mod tests {
         assert_eq!(response.status, 200);
         assert!(body.contains("\"token_configured\":true"));
         assert!(body.contains("\"terminal_token_configured\":true"));
+        assert!(!body.contains("\"terminal\":{\"enabled\":true,\"token_configured\""));
         assert!(!body.contains("terminal-secret"));
         assert!(!body.contains("remote-terminal-secret"));
         assert!(!body.contains("read-secret"));
@@ -1809,26 +2002,33 @@ mod tests {
     #[test]
     fn sessions_response_does_not_expose_remote_terminal_tokens() {
         let mut options = gateway_options();
-        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_once(|request| {
-            assert_eq!(request.method, methods::SESSIONS_SUMMARIES);
-            JsonRpcResponse::success(
-                request.id,
-                serde_json::json!({
-                    "sessions": [],
-                    "warnings": [],
-                    "counts": {
-                        "total": 0,
-                        "by_provider": {},
-                        "by_origin": {}
-                    }
-                }),
-            )
+        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_n(2, |idx, request| match idx {
+            0 => {
+                assert_eq!(request.method, methods::AUTH_VALIDATE);
+                JsonRpcResponse::success(request.id, auth_validation_json())
+            }
+            1 => {
+                assert_eq!(request.method, methods::SESSIONS_SUMMARIES);
+                JsonRpcResponse::success(
+                    request.id,
+                    serde_json::json!({
+                        "sessions": [],
+                        "warnings": [],
+                        "counts": {
+                            "total": 0,
+                            "by_provider": {},
+                            "by_origin": {}
+                        }
+                    }),
+                )
+            }
+            _ => unreachable!(),
         });
         options.daemon_socket = Some(daemon_socket);
         let request = Request {
             method: "GET".to_string(),
-            target: "/api/v1/sessions?token=secret".to_string(),
-            headers: Vec::new(),
+            target: "/api/v1/sessions".to_string(),
+            headers: account_headers(),
             body: Vec::new(),
         };
 
@@ -1859,39 +2059,47 @@ mod tests {
     #[test]
     fn put_ai_config_updates_without_echoing_or_overwriting_blank_api_key() {
         let mut options = gateway_options();
-        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_once(|request| {
-            assert_eq!(request.method, methods::SETTINGS_AI_UPDATE);
-            let params: AiSettingsUpdateParams =
-                serde_json::from_value(request.params.unwrap()).unwrap();
-            assert_eq!(
-                params.base_url.as_deref(),
-                Some(" https://example.test/v1 ")
-            );
-            assert_eq!(params.model.as_deref(), Some(" test-model "));
-            assert_eq!(params.api_key.as_deref(), Some("   "));
-            JsonRpcResponse::success(
-                request.id,
-                serde_json::json!({
-                    "base_url": "https://example.test/v1",
-                    "model": "test-model",
-                    "enabled": true,
-                    "provider": "openai",
-                    "api_key_env": "OPENAI_API_KEY",
-                    "api_key_configured": true,
-                    "key_source": "stored"
-                }),
-            )
+        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_n(2, |idx, request| match idx {
+            0 => {
+                assert_eq!(request.method, methods::AUTH_VALIDATE);
+                JsonRpcResponse::success(request.id, auth_validation_json())
+            }
+            1 => {
+                assert_eq!(request.method, methods::SETTINGS_AI_UPDATE);
+                let params: AiSettingsUpdateParams =
+                    serde_json::from_value(request.params.unwrap()).unwrap();
+                assert_eq!(
+                    params.base_url.as_deref(),
+                    Some(" https://example.test/v1 ")
+                );
+                assert_eq!(params.model.as_deref(), Some(" test-model "));
+                assert_eq!(params.api_key.as_deref(), Some("   "));
+                JsonRpcResponse::success(
+                    request.id,
+                    serde_json::json!({
+                        "base_url": "https://example.test/v1",
+                        "model": "test-model",
+                        "enabled": true,
+                        "provider": "openai",
+                        "api_key_env": "OPENAI_API_KEY",
+                        "api_key_configured": true,
+                        "key_source": "stored"
+                    }),
+                )
+            }
+            _ => unreachable!(),
         });
         options.daemon_socket = Some(daemon_socket);
-        let request = json_request(
+        let mut request = json_request(
             "PUT",
-            "/api/v1/config/ai?token=secret",
+            "/api/v1/config/ai",
             r#"{
                 "base_url": " https://example.test/v1 ",
                 "model": " test-model ",
                 "api_key": "   "
             }"#,
         );
+        request.headers.extend(account_headers());
 
         let response = route_request(&request, &options);
         let body = String::from_utf8(response.body).unwrap();
@@ -1908,31 +2116,39 @@ mod tests {
     #[test]
     fn put_ai_config_clear_flag_clears_api_key() {
         let mut options = gateway_options();
-        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_once(|request| {
-            assert_eq!(request.method, methods::SETTINGS_AI_UPDATE);
-            let params: AiSettingsUpdateParams =
-                serde_json::from_value(request.params.unwrap()).unwrap();
-            assert!(params.clear_api_key);
-            assert_eq!(params.api_key.as_deref(), Some("sk-new"));
-            JsonRpcResponse::success(
-                request.id,
-                serde_json::json!({
-                    "base_url": "https://api.openai.com/v1",
-                    "model": "gpt-4.1",
-                    "enabled": true,
-                    "provider": "openai",
-                    "api_key_env": "OPENAI_API_KEY",
-                    "api_key_configured": false,
-                    "key_source": "none"
-                }),
-            )
+        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_n(2, |idx, request| match idx {
+            0 => {
+                assert_eq!(request.method, methods::AUTH_VALIDATE);
+                JsonRpcResponse::success(request.id, auth_validation_json())
+            }
+            1 => {
+                assert_eq!(request.method, methods::SETTINGS_AI_UPDATE);
+                let params: AiSettingsUpdateParams =
+                    serde_json::from_value(request.params.unwrap()).unwrap();
+                assert!(params.clear_api_key);
+                assert_eq!(params.api_key.as_deref(), Some("sk-new"));
+                JsonRpcResponse::success(
+                    request.id,
+                    serde_json::json!({
+                        "base_url": "https://api.openai.com/v1",
+                        "model": "gpt-4.1",
+                        "enabled": true,
+                        "provider": "openai",
+                        "api_key_env": "OPENAI_API_KEY",
+                        "api_key_configured": false,
+                        "key_source": "none"
+                    }),
+                )
+            }
+            _ => unreachable!(),
         });
         options.daemon_socket = Some(daemon_socket);
-        let request = json_request(
+        let mut request = json_request(
             "PUT",
-            "/api/v1/config/ai?token=secret",
+            "/api/v1/config/ai",
             r#"{ "clear_api_key": true, "api_key": "sk-new" }"#,
         );
+        request.headers.extend(account_headers());
 
         let response = route_request(&request, &options);
         let body = String::from_utf8(response.body).unwrap();
@@ -1972,26 +2188,20 @@ mod tests {
             info,
             GatewayStartupInfo {
                 listen_addr: "0.0.0.0:8787".to_string(),
-                browser_url: "http://127.0.0.1:8787/?token=secret".to_string(),
+                browser_url: "http://127.0.0.1:8787".to_string(),
                 share_base_url: "http://127.0.0.1:8787".to_string(),
-                token: "secret".to_string(),
             }
         );
     }
 
     #[test]
-    fn startup_info_formats_ipv6_and_encodes_token() {
-        let mut options = gateway_options();
-        options.read_token = " secret/with space? ".to_string();
+    fn startup_info_formats_ipv6() {
+        let options = gateway_options();
 
         let info = startup_info(&options, "[::1]:8787".parse().unwrap());
 
         assert_eq!(info.listen_addr, "[::1]:8787");
-        assert_eq!(
-            info.browser_url,
-            "http://[::1]:8787/?token=secret%2Fwith%20space%3F"
-        );
-        assert_eq!(info.token, "secret/with space?");
+        assert_eq!(info.browser_url, "http://[::1]:8787");
     }
 
     #[cfg(unix)]
@@ -1999,6 +2209,13 @@ mod tests {
     fn terminal_websocket_forwards_json_frames_to_daemon_stream() {
         use std::os::unix::net::UnixListener;
 
+        let (_auth_dir, daemon_socket, auth_daemon_handle) = spawn_daemon_once(|request| {
+            assert_eq!(request.method, methods::AUTH_VALIDATE);
+            JsonRpcResponse::success(
+                request.id,
+                auth_validation_json_with_scopes(&[TERMINAL_WRITE_SCOPE]),
+            )
+        });
         let dir = tempfile::tempdir().unwrap();
         let terminal_socket = dir.path().join("terminal.sock");
         let listener = UnixListener::bind(&terminal_socket).unwrap();
@@ -2023,8 +2240,8 @@ mod tests {
         });
 
         let mut options = gateway_options();
+        options.daemon_socket = Some(daemon_socket);
         options.terminal_enabled = true;
-        options.terminal_token = "terminal-secret".to_string();
         options.terminal_socket = Some(terminal_socket);
 
         let web_listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2037,8 +2254,9 @@ mod tests {
         let mut client = TcpStream::connect(web_addr).unwrap();
         write!(
             client,
-            "GET /api/v1/terminal/ws?token=secret&terminal_token=terminal-secret HTTP/1.1\r\n\
+            "GET /api/v1/terminal/ws HTTP/1.1\r\n\
              Host: 127.0.0.1\r\n\
+             Authorization: Bearer session-secret\r\n\
              Upgrade: websocket\r\n\
              Connection: Upgrade\r\n\
              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
@@ -2076,16 +2294,21 @@ mod tests {
 
         web_handle.join().unwrap();
         daemon_handle.join().unwrap();
+        auth_daemon_handle.join().unwrap();
     }
 
     #[cfg(unix)]
     #[test]
     fn terminal_sessions_are_loaded_from_daemon_rpc() {
-        let dir = tempfile::tempdir().unwrap();
-        let daemon_socket = dir.path().join("daemon.sock");
-        let server_socket = daemon_socket.clone();
-        let daemon_handle = std::thread::spawn(move || {
-            coca_ipc::unix::serve_one(&server_socket, |request| {
+        let (_dir, daemon_socket, daemon_handle) = spawn_daemon_n(2, |idx, request| match idx {
+            0 => {
+                assert_eq!(request.method, methods::AUTH_VALIDATE);
+                JsonRpcResponse::success(
+                    request.id,
+                    auth_validation_json_with_scopes(&[TERMINAL_READ_SCOPE]),
+                )
+            }
+            1 => {
                 assert_eq!(request.method, methods::TERMINAL_LIST);
                 JsonRpcResponse::success(
                     request.id,
@@ -2094,22 +2317,17 @@ mod tests {
                     })
                     .unwrap(),
                 )
-            })
-            .unwrap();
+            }
+            _ => unreachable!(),
         });
-        wait_for_path(&daemon_socket);
 
         let mut options = gateway_options();
         options.daemon_socket = Some(daemon_socket);
         options.terminal_enabled = true;
-        options.terminal_token = "terminal-secret".to_string();
         let request = Request {
             method: "GET".to_string(),
-            target: "/api/v1/terminal/sessions?token=secret".to_string(),
-            headers: vec![(
-                "x-coca-terminal-token".to_string(),
-                "terminal-secret".to_string(),
-            )],
+            target: "/api/v1/terminal/sessions".to_string(),
+            headers: account_headers(),
             body: Vec::new(),
         };
 
@@ -2124,15 +2342,18 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn terminal_sessions_accept_auth_token_but_still_require_terminal_token() {
+    fn terminal_sessions_require_terminal_read_scope() {
         let (_dir, daemon_socket, daemon_handle) = spawn_daemon_n(3, |idx, request| match idx {
             0 => {
                 assert_eq!(request.method, methods::AUTH_VALIDATE);
-                JsonRpcResponse::success(request.id, auth_validation_json())
+                JsonRpcResponse::success(request.id, auth_validation_json_with_scopes(&[]))
             }
             1 => {
                 assert_eq!(request.method, methods::AUTH_VALIDATE);
-                JsonRpcResponse::success(request.id, auth_validation_json())
+                JsonRpcResponse::success(
+                    request.id,
+                    auth_validation_json_with_scopes(&[TERMINAL_READ_SCOPE]),
+                )
             }
             2 => {
                 assert_eq!(request.method, methods::TERMINAL_LIST);
@@ -2149,33 +2370,20 @@ mod tests {
         let mut options = gateway_options();
         options.daemon_socket = Some(daemon_socket);
         options.terminal_enabled = true;
-        options.terminal_token = "terminal-secret".to_string();
-        let missing_terminal = Request {
+        let missing_scope = Request {
             method: "GET".to_string(),
             target: "/api/v1/terminal/sessions".to_string(),
-            headers: vec![(
-                "authorization".to_string(),
-                "Bearer session-secret".to_string(),
-            )],
+            headers: account_headers(),
             body: Vec::new(),
         };
         let accepted = Request {
             method: "GET".to_string(),
             target: "/api/v1/terminal/sessions".to_string(),
-            headers: vec![
-                (
-                    "authorization".to_string(),
-                    "Bearer session-secret".to_string(),
-                ),
-                (
-                    "x-coca-terminal-token".to_string(),
-                    "terminal-secret".to_string(),
-                ),
-            ],
+            headers: account_headers(),
             body: Vec::new(),
         };
 
-        assert_eq!(route_request(&missing_terminal, &options).status, 403);
+        assert_eq!(route_request(&missing_scope, &options).status, 403);
         assert_eq!(route_request(&accepted, &options).status, 200);
         daemon_handle.join().unwrap();
     }
@@ -2192,13 +2400,18 @@ mod tests {
         }
     }
 
+    fn account_headers() -> Vec<(String, String)> {
+        vec![(
+            "authorization".to_string(),
+            "Bearer session-secret".to_string(),
+        )]
+    }
+
     fn gateway_options() -> GatewayOptions {
         GatewayOptions {
             bind: "127.0.0.1:0".to_string(),
-            read_token: "secret".to_string(),
             share_base_url: "http://127.0.0.1:8787".to_string(),
             terminal_enabled: false,
-            terminal_token: String::new(),
             static_dir: PathBuf::from("__missing_static_dir__"),
             daemon_socket: Some(PathBuf::from("__missing_daemon.sock")),
             terminal_socket: None,
@@ -2267,10 +2480,23 @@ mod tests {
     }
 
     fn auth_validation_json() -> serde_json::Value {
+        auth_validation_json_with_scopes(&[
+            "sessions.read",
+            "share.manage",
+            "account.manage",
+            "tokens.manage",
+            TERMINAL_READ_SCOPE,
+            TERMINAL_WRITE_SCOPE,
+            TERMINAL_KILL_SCOPE,
+        ])
+    }
+
+    fn auth_validation_json_with_scopes(scopes: &[&str]) -> serde_json::Value {
         serde_json::json!({
             "user": account_user_json(),
             "credential_id": "dev_1",
-            "credential_kind": "DeviceSession"
+            "credential_kind": "DeviceSession",
+            "scopes": scopes
         })
     }
 

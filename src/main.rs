@@ -49,10 +49,8 @@ fn main() -> Result<()> {
                     .unwrap_or_else(|| PathBuf::from(settings.daemon.terminal_socket.clone()));
                 serve_gateway(GatewayOptions {
                     bind,
-                    read_token: settings.share.token.clone(),
                     share_base_url: settings.share.base_url.clone(),
                     terminal_enabled: settings.terminal.enabled,
-                    terminal_token: settings.terminal.token.clone(),
                     static_dir: args.static_dir().unwrap_or_else(default_web_static_dir),
                     daemon_socket: Some(daemon_socket),
                     terminal_socket: Some(terminal_socket),

@@ -38,9 +38,9 @@ The shared browser view remains read-only. It must not mutate provider histories
 - `coca core` serves both:
   - `GET /api/sessions` for remote browsing.
   - `/s/<provider>/<session-id>?token=<token>` for read-only Web share pages.
-- Settings include `core.bind`, configured remotes, origin visibility, launch defaults, `share.base_url`, and generated `share.token`.
+- Historical settings included `core.bind`, configured remotes, origin visibility, launch defaults, `share.base_url`, and generated `share.token`; current auth uses account-scoped tokens and per-link share tokens instead.
 - The TUI settings page can edit origin visibility, core bind, share settings, and launch defaults.
-- The TUI `u` key shows a read-only share URL for local sessions and rejects remote sessions.
+- Historically the TUI `u` key showed a read-only share URL for local sessions; current sharing is managed from Web Profile/Access with authenticated per-link tokens.
 - The default TUI path uses the JSON-RPC core router through an in-process client, so terminal UI behavior follows the same frontend/core boundary as the local daemon.
 - `coca daemon --socket <path>` exposes the JSON-RPC core boundary over local IPC for future GUI work.
 

@@ -177,7 +177,6 @@ pub(super) enum ConfigItem {
         kind: LaunchOptionKind,
     },
     ShareBaseUrl,
-    ShareToken,
 }
 
 impl App {
@@ -344,7 +343,6 @@ impl App {
         items.extend([
             ConfigItem::GatewayBind,
             ConfigItem::ShareBaseUrl,
-            ConfigItem::ShareToken,
             ConfigItem::LaunchDefault {
                 mode: LaunchMode::Resume,
                 kind: LaunchOptionKind::UseCurrentDir,
@@ -436,10 +434,10 @@ impl DaemonClient for TestDaemonClient {
     }
 
     fn share_url(&mut self, session: &Session) -> Result<String> {
-        self.app_service()
-            .share_link_for_session(session)
-            .map(|link| link.url)
-            .map_err(|err| anyhow!("{err:#}"))
+        let _ = session;
+        Err(anyhow!(
+            "Share links require an authenticated Web account. Use the browser Profile/Access flow to create a share link."
+        ))
     }
 
     fn launch_options(
@@ -591,10 +589,9 @@ mod tests {
     }
 
     #[test]
-    fn u_opens_share_dialog_for_local_session() {
+    fn u_requires_web_account_for_local_share_link() {
         let mut settings = Settings::default();
         settings.share.base_url = "http://host:8787".to_string();
-        settings.share.token = "secret".to_string();
         let mut app = App::new_with_test_settings(
             vec![session(ProviderKind::Codex, "sid", "hello codex")],
             ProviderFilter::All,
@@ -604,14 +601,15 @@ mod tests {
 
         app.handle_key(KeyEvent::from(KeyCode::Char('u')));
 
+        assert!(app.share_dialog.is_none());
         assert_eq!(
-            app.share_dialog.as_ref().map(|dialog| dialog.url.as_str()),
-            Some("http://host:8787/?token=secret#/session/local/codex/sid")
+            app.status_message.as_deref(),
+            Some("Share links require an authenticated Web account. Use the browser Profile/Access flow to create a share link.")
         );
     }
 
     #[test]
-    fn u_uses_default_share_settings() {
+    fn u_with_default_share_settings_requires_web_account() {
         let mut app = App::new_with_warnings(
             vec![session(ProviderKind::Codex, "sid", "hello codex")],
             ProviderFilter::All,
@@ -620,9 +618,11 @@ mod tests {
 
         app.handle_key(KeyEvent::from(KeyCode::Char('u')));
 
-        let url = app.share_dialog.as_ref().map(|dialog| dialog.url.as_str());
-        assert!(url.unwrap().starts_with("http://127.0.0.1:8787/?token="));
-        assert!(url.unwrap().ends_with("#/session/local/codex/sid"));
+        assert!(app.share_dialog.is_none());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Share links require an authenticated Web account. Use the browser Profile/Access flow to create a share link.")
+        );
     }
 
     #[test]
@@ -631,7 +631,6 @@ mod tests {
         remote.origin = SessionOrigin::Remote("work-mac".to_string());
         let mut settings = Settings::default();
         settings.share.base_url = "http://host:8787".to_string();
-        settings.share.token = "secret".to_string();
         let mut app =
             App::new_with_test_settings(vec![remote], ProviderFilter::All, Vec::new(), settings);
 
@@ -640,7 +639,7 @@ mod tests {
         assert!(app.share_dialog.is_none());
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Remote sessions cannot be shared from this machine in v0: work-mac")
+            Some("Share links require an authenticated Web account. Use the browser Profile/Access flow to create a share link.")
         );
     }
 
@@ -896,29 +895,6 @@ mod tests {
     }
 
     #[test]
-    fn config_page_edits_share_token() {
-        let mut app = App::new_with_warnings(
-            vec![session(ProviderKind::Claude, "sid", "hello claude")],
-            ProviderFilter::All,
-            Vec::new(),
-        );
-
-        app.handle_key(KeyEvent::from(KeyCode::Char(',')));
-        app.handle_key(KeyEvent::from(KeyCode::Down));
-        app.handle_key(KeyEvent::from(KeyCode::Down));
-        app.handle_key(KeyEvent::from(KeyCode::Down));
-        app.handle_key(KeyEvent::from(KeyCode::Enter));
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        for ch in "secret".chars() {
-            app.handle_key(KeyEvent::from(KeyCode::Char(ch)));
-        }
-        app.handle_key(KeyEvent::from(KeyCode::Enter));
-
-        assert_eq!(app.settings.share.token, "secret");
-    }
-
-    #[test]
     fn config_page_toggles_launch_defaults_used_by_s_dialog() {
         let mut app = App::new_with_warnings(
             vec![session(ProviderKind::Codex, "sid", "hello codex")],
@@ -927,7 +903,6 @@ mod tests {
         );
 
         app.handle_key(KeyEvent::from(KeyCode::Char(',')));
-        app.handle_key(KeyEvent::from(KeyCode::Down));
         app.handle_key(KeyEvent::from(KeyCode::Down));
         app.handle_key(KeyEvent::from(KeyCode::Down));
         app.handle_key(KeyEvent::from(KeyCode::Down));

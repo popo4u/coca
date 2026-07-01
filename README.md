@@ -10,7 +10,7 @@ It lets you browse, inspect, resume, and fork conversations created by tools lik
 - Filters by provider and searches across session text.
 - Shows session metadata and the full first prompt inline.
 - Opens a transcript viewer for reconstructed conversation history.
-- Shows a read-only browser share URL for local sessions.
+- Lets signed-in Web users create and revoke read-only share links.
 - Resumes existing sessions with the right provider command.
 - Forks or executes sessions with provider-specific launch options.
 - Fetches remote sessions through a read-only HTTP core.
@@ -49,7 +49,7 @@ coca --codex-home ~/.codex --claude-home ~/.claude
 coca --remote-config ~/.config/coca/remotes.json
 ```
 
-By default `coca` reads and writes settings at `~/.config/coca/settings.json`. Press `,` in the TUI to edit visible origins, core bind settings, share settings, and launch defaults. `share.token` is generated automatically when settings are first created or loaded without a token.
+By default `coca` reads and writes settings at `~/.config/coca/settings.json`. Press `,` in the TUI to edit visible origins, gateway bind settings, share base URL, and launch defaults. Browser access uses account sign-in and scoped access tokens.
 
 ## Core
 
@@ -74,11 +74,7 @@ coca web
 coca web --bind 127.0.0.1:8787
 ```
 
-Open the printed URL, or pass `share.token` once as a query token:
-
-```text
-http://127.0.0.1:8787/?token=<secret>
-```
+Open the printed URL and sign in with a local account. The first account can be created from the browser sign-up screen.
 
 Run the local daemon for advanced integrations:
 
@@ -87,13 +83,15 @@ coca daemon
 coca daemon --socket ~/.config/coca/core.sock
 ```
 
-Press `u` on a local session in the TUI to show its browser URL:
+Create public read-only links from the Web Profile/Access page. Share links use
+per-link tokens and expire independently from account sessions:
 
 ```text
-http://192.168.1.20:8787/?token=<secret>#/session/local/codex/<session-id>
+http://192.168.1.20:8787/#/share/<link-id>?share_token=<secret>
 ```
 
-Shared sessions are browse-only. Anyone with the URL, token, and network access can read the session, so use a strong token and bind only to networks you trust.
+Shared sessions are browse-only. Anyone with the URL, link token, and network
+access can read the shared session until the link expires or is revoked.
 
 Configure the browsing machine with `~/.config/coca/settings.json`:
 
@@ -154,7 +152,7 @@ Remote sessions support listing, search, details, and transcript viewing. Resume
 | `Space` | Expand or collapse session details |
 | `t` | Open transcript viewer |
 | `h` / `l` | Page transcript backward or forward |
-| `u` | Show read-only share URL for local session |
+| `u` | Explain that share links are managed from Web Profile/Access |
 | `Enter` | Resume selected session |
 | `s` | Execute selected session with launch options |
 | `f` | Fork selected session with launch options |

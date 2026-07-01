@@ -96,13 +96,11 @@ cd ../..
 cargo run -- gateway --bind 0.0.0.0:8787
 ```
 
-Open the Web frontend and enter `share.token`, or pass it once as a query token:
+Open the Web frontend and sign in with a local account. The first account can be
+created from the browser sign-up screen.
 
-```text
-http://127.0.0.1:8787/?token=<secret>
-```
-
-During frontend development, run Vite and proxy API calls to `coca gateway`:
+During frontend development, the xtask dev command runs Vite for you. To run it
+manually and proxy API calls to `coca gateway`:
 
 ```sh
 cd app/web
@@ -113,10 +111,10 @@ The browser app talks to `coca gateway`. Gateway proxies business and terminal
 runtime APIs to `coca daemon`; it does not own provider parsing or terminal
 lifecycle. The TUI follows the same authority boundary through a daemon client.
 
-In the TUI, press `,` to edit gateway, share, terminal, and launch settings,
-then press `u` on a local session to show its share URL. Restart `coca gateway`
-after changing gateway bind or share settings used by the running browser
-gateway.
+In the TUI, press `,` to edit gateway, share base URL, terminal enablement, and
+launch settings. Share links are managed from the Web Profile/Access flow after
+signing in. Restart `coca gateway` after changing gateway bind or share settings
+used by the running browser gateway.
 
 Show CLI help:
 

@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::model::Session;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub fn default_database_path() -> Option<PathBuf> {
     dirs::data_local_dir()
@@ -339,14 +339,15 @@ impl DerivedStore {
             .execute(
                 r#"
                 INSERT INTO auth_device_sessions (
-                    id, user_id, token_hash, label, created_at_ms, last_seen_at_ms, revoked_at_ms
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+                    id, user_id, token_hash, label, scopes_json, created_at_ms, last_seen_at_ms, revoked_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)
                 "#,
                 params![
                     input.id,
                     input.user_id,
                     input.token_hash,
                     input.label,
+                    input.scopes_json,
                     now,
                     now,
                 ],
@@ -366,6 +367,7 @@ impl DerivedStore {
                 r#"
                 SELECT
                     s.id, s.user_id, s.label, s.created_at_ms, s.last_seen_at_ms, s.revoked_at_ms,
+                    s.scopes_json,
                     u.id, u.email, u.display_name, u.created_at_ms, u.updated_at_ms
                 FROM auth_device_sessions s
                 JOIN auth_users u ON u.id = s.user_id
@@ -381,13 +383,14 @@ impl DerivedStore {
                             created_at_ms: row.get(3)?,
                             last_seen_at_ms: row.get(4)?,
                             revoked_at_ms: row.get(5)?,
+                            scopes_json: row.get(6)?,
                         },
                         StoredUser {
-                            id: row.get(6)?,
-                            email: row.get(7)?,
-                            display_name: row.get(8)?,
-                            created_at_ms: row.get(9)?,
-                            updated_at_ms: row.get(10)?,
+                            id: row.get(7)?,
+                            email: row.get(8)?,
+                            display_name: row.get(9)?,
+                            created_at_ms: row.get(10)?,
+                            updated_at_ms: row.get(11)?,
                         },
                     ))
                 },
@@ -402,6 +405,7 @@ impl DerivedStore {
             user,
             credential_id: session.id,
             credential_kind: AuthCredentialKind::DeviceSession,
+            scopes_json: session.scopes_json,
         }))
     }
 
@@ -410,7 +414,7 @@ impl DerivedStore {
             .conn
             .prepare(
                 r#"
-                SELECT id, user_id, label, created_at_ms, last_seen_at_ms, revoked_at_ms
+                SELECT id, user_id, label, created_at_ms, last_seen_at_ms, revoked_at_ms, scopes_json
                 FROM auth_device_sessions
                 WHERE user_id = ?1
                 ORDER BY created_at_ms DESC
@@ -445,10 +449,17 @@ impl DerivedStore {
             .execute(
                 r#"
                 INSERT INTO auth_access_tokens (
-                    id, user_id, name, token_hash, created_at_ms, last_used_at_ms, revoked_at_ms
-                ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL)
+                    id, user_id, name, token_hash, scopes_json, created_at_ms, last_used_at_ms, revoked_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL)
                 "#,
-                params![input.id, input.user_id, input.name, input.token_hash, now],
+                params![
+                    input.id,
+                    input.user_id,
+                    input.name,
+                    input.token_hash,
+                    input.scopes_json,
+                    now
+                ],
             )
             .context("failed to create auth access token")?;
         self.access_token_by_id(input.user_id, input.id)?
@@ -462,6 +473,7 @@ impl DerivedStore {
                 r#"
                 SELECT
                     t.id, t.user_id, t.name, t.created_at_ms, t.last_used_at_ms, t.revoked_at_ms,
+                    t.scopes_json,
                     u.id, u.email, u.display_name, u.created_at_ms, u.updated_at_ms
                 FROM auth_access_tokens t
                 JOIN auth_users u ON u.id = t.user_id
@@ -477,13 +489,14 @@ impl DerivedStore {
                             created_at_ms: row.get(3)?,
                             last_used_at_ms: row.get(4)?,
                             revoked_at_ms: row.get(5)?,
+                            scopes_json: row.get(6)?,
                         },
                         StoredUser {
-                            id: row.get(6)?,
-                            email: row.get(7)?,
-                            display_name: row.get(8)?,
-                            created_at_ms: row.get(9)?,
-                            updated_at_ms: row.get(10)?,
+                            id: row.get(7)?,
+                            email: row.get(8)?,
+                            display_name: row.get(9)?,
+                            created_at_ms: row.get(10)?,
+                            updated_at_ms: row.get(11)?,
                         },
                     ))
                 },
@@ -498,6 +511,7 @@ impl DerivedStore {
             user,
             credential_id: token.id,
             credential_kind: AuthCredentialKind::AccessToken,
+            scopes_json: token.scopes_json,
         }))
     }
 
@@ -506,7 +520,7 @@ impl DerivedStore {
             .conn
             .prepare(
                 r#"
-                SELECT id, user_id, name, created_at_ms, last_used_at_ms, revoked_at_ms
+                SELECT id, user_id, name, created_at_ms, last_used_at_ms, revoked_at_ms, scopes_json
                 FROM auth_access_tokens
                 WHERE user_id = ?1
                 ORDER BY created_at_ms DESC
@@ -535,6 +549,98 @@ impl DerivedStore {
         Ok(changed > 0)
     }
 
+    pub fn create_share_link(&self, input: NewShareLink<'_>) -> Result<StoredShareLink> {
+        let now = now_ms();
+        self.conn
+            .execute(
+                r#"
+                INSERT INTO auth_share_links (
+                    id, creator_user_id, origin, provider, session_id, token_hash,
+                    created_at_ms, last_used_at_ms, expires_at_ms, revoked_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, NULL)
+                "#,
+                params![
+                    input.id,
+                    input.creator_user_id,
+                    input.origin,
+                    input.provider,
+                    input.session_id,
+                    input.token_hash,
+                    now,
+                    input.expires_at_ms,
+                ],
+            )
+            .context("failed to create auth share link")?;
+        self.share_link_by_id(input.id)?
+            .context("created auth share link was not found")
+    }
+
+    pub fn validate_share_link(
+        &self,
+        share_id: &str,
+        token_hash: &str,
+    ) -> Result<Option<StoredShareLink>> {
+        let Some(link) = self
+            .conn
+            .query_row(
+                r#"
+                SELECT
+                    id, creator_user_id, origin, provider, session_id,
+                    created_at_ms, last_used_at_ms, expires_at_ms, revoked_at_ms
+                FROM auth_share_links
+                WHERE id = ?1
+                    AND token_hash = ?2
+                    AND revoked_at_ms IS NULL
+                    AND expires_at_ms > ?3
+                "#,
+                params![share_id, token_hash, now_ms()],
+                stored_share_link_from_row,
+            )
+            .optional()
+            .context("failed to validate auth share link")?
+        else {
+            return Ok(None);
+        };
+        self.touch_share_link(&link.id)?;
+        Ok(Some(link))
+    }
+
+    pub fn list_share_links(&self, user_id: &str) -> Result<Vec<StoredShareLink>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT
+                    id, creator_user_id, origin, provider, session_id,
+                    created_at_ms, last_used_at_ms, expires_at_ms, revoked_at_ms
+                FROM auth_share_links
+                WHERE creator_user_id = ?1
+                ORDER BY created_at_ms DESC
+                "#,
+            )
+            .context("failed to prepare auth share links query")?;
+        let rows = stmt
+            .query_map(params![user_id], stored_share_link_from_row)
+            .context("failed to query auth share links")?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to read auth share links")
+    }
+
+    pub fn revoke_share_link(&self, user_id: &str, share_id: &str) -> Result<bool> {
+        let changed = self
+            .conn
+            .execute(
+                r#"
+                UPDATE auth_share_links
+                SET revoked_at_ms = ?3
+                WHERE creator_user_id = ?1 AND id = ?2 AND revoked_at_ms IS NULL
+                "#,
+                params![user_id, share_id, now_ms()],
+            )
+            .context("failed to revoke auth share link")?;
+        Ok(changed > 0)
+    }
+
     fn device_session_by_id(
         &self,
         user_id: &str,
@@ -543,7 +649,7 @@ impl DerivedStore {
         self.conn
             .query_row(
                 r#"
-                SELECT id, user_id, label, created_at_ms, last_seen_at_ms, revoked_at_ms
+                SELECT id, user_id, label, created_at_ms, last_seen_at_ms, revoked_at_ms, scopes_json
                 FROM auth_device_sessions
                 WHERE user_id = ?1 AND id = ?2
                 "#,
@@ -562,7 +668,7 @@ impl DerivedStore {
         self.conn
             .query_row(
                 r#"
-                SELECT id, user_id, name, created_at_ms, last_used_at_ms, revoked_at_ms
+                SELECT id, user_id, name, created_at_ms, last_used_at_ms, revoked_at_ms, scopes_json
                 FROM auth_access_tokens
                 WHERE user_id = ?1 AND id = ?2
                 "#,
@@ -571,6 +677,23 @@ impl DerivedStore {
             )
             .optional()
             .context("failed to load auth access token")
+    }
+
+    fn share_link_by_id(&self, share_id: &str) -> Result<Option<StoredShareLink>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    id, creator_user_id, origin, provider, session_id,
+                    created_at_ms, last_used_at_ms, expires_at_ms, revoked_at_ms
+                FROM auth_share_links
+                WHERE id = ?1
+                "#,
+                params![share_id],
+                stored_share_link_from_row,
+            )
+            .optional()
+            .context("failed to load auth share link")
     }
 
     fn touch_device_session(&self, session_id: &str) -> Result<()> {
@@ -590,6 +713,16 @@ impl DerivedStore {
                 params![token_id, now_ms()],
             )
             .context("failed to update auth access token last_used")?;
+        Ok(())
+    }
+
+    fn touch_share_link(&self, share_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE auth_share_links SET last_used_at_ms = ?2 WHERE id = ?1",
+                params![share_id, now_ms()],
+            )
+            .context("failed to update auth share link last_used")?;
         Ok(())
     }
 
@@ -646,7 +779,7 @@ impl DerivedStore {
                     .context("failed to migrate storage schema to version 1")?;
                 self.migrate_auth_schema()
             }
-            1 => self.migrate_auth_schema(),
+            1 | 2 => self.migrate_auth_schema(),
             SCHEMA_VERSION => Ok(()),
             newer if newer > SCHEMA_VERSION => bail!(
                 "storage schema version {newer} is newer than supported version {SCHEMA_VERSION}"
@@ -656,6 +789,16 @@ impl DerivedStore {
     }
 
     fn migrate_auth_schema(&self) -> Result<()> {
+        self.conn
+            .execute_batch(
+                r#"
+                DROP TABLE IF EXISTS auth_share_links;
+                DROP TABLE IF EXISTS auth_access_tokens;
+                DROP TABLE IF EXISTS auth_device_sessions;
+                DROP TABLE IF EXISTS auth_users;
+                "#,
+            )
+            .context("failed to reset auth schema")?;
         self.conn
             .execute_batch(
                 r#"
@@ -673,6 +816,7 @@ impl DerivedStore {
                     user_id TEXT NOT NULL,
                     token_hash TEXT NOT NULL UNIQUE,
                     label TEXT,
+                    scopes_json TEXT NOT NULL,
                     created_at_ms INTEGER NOT NULL,
                     last_seen_at_ms INTEGER NOT NULL,
                     revoked_at_ms INTEGER,
@@ -687,6 +831,7 @@ impl DerivedStore {
                     user_id TEXT NOT NULL,
                     name TEXT NOT NULL,
                     token_hash TEXT NOT NULL UNIQUE,
+                    scopes_json TEXT NOT NULL,
                     created_at_ms INTEGER NOT NULL,
                     last_used_at_ms INTEGER,
                     revoked_at_ms INTEGER,
@@ -696,10 +841,27 @@ impl DerivedStore {
                 CREATE INDEX idx_auth_access_tokens_user
                     ON auth_access_tokens(user_id, revoked_at_ms, created_at_ms DESC);
 
-                PRAGMA user_version = 2;
+                CREATE TABLE auth_share_links (
+                    id TEXT PRIMARY KEY,
+                    creator_user_id TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    created_at_ms INTEGER NOT NULL,
+                    last_used_at_ms INTEGER,
+                    expires_at_ms INTEGER NOT NULL,
+                    revoked_at_ms INTEGER,
+                    FOREIGN KEY(creator_user_id) REFERENCES auth_users(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX idx_auth_share_links_creator
+                    ON auth_share_links(creator_user_id, revoked_at_ms, created_at_ms DESC);
+
+                PRAGMA user_version = 3;
                 "#,
             )
-            .context("failed to migrate storage schema to version 2")
+            .context("failed to migrate storage schema to version 3")
     }
 }
 
@@ -759,6 +921,7 @@ pub struct StoredDeviceSession {
     pub created_at_ms: i64,
     pub last_seen_at_ms: i64,
     pub revoked_at_ms: Option<i64>,
+    pub scopes_json: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -767,6 +930,7 @@ pub struct NewDeviceSession<'a> {
     pub user_id: &'a str,
     pub token_hash: &'a str,
     pub label: Option<&'a str>,
+    pub scopes_json: &'a str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -777,6 +941,7 @@ pub struct StoredAccessToken {
     pub created_at_ms: i64,
     pub last_used_at_ms: Option<i64>,
     pub revoked_at_ms: Option<i64>,
+    pub scopes_json: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -785,6 +950,31 @@ pub struct NewAccessToken<'a> {
     pub user_id: &'a str,
     pub name: &'a str,
     pub token_hash: &'a str,
+    pub scopes_json: &'a str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredShareLink {
+    pub id: String,
+    pub creator_user_id: String,
+    pub origin: String,
+    pub provider: String,
+    pub session_id: String,
+    pub created_at_ms: i64,
+    pub last_used_at_ms: Option<i64>,
+    pub expires_at_ms: i64,
+    pub revoked_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NewShareLink<'a> {
+    pub id: &'a str,
+    pub creator_user_id: &'a str,
+    pub origin: &'a str,
+    pub provider: &'a str,
+    pub session_id: &'a str,
+    pub token_hash: &'a str,
+    pub expires_at_ms: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -798,6 +988,7 @@ pub struct StoredAuthCredential {
     pub user: StoredUser,
     pub credential_id: String,
     pub credential_kind: AuthCredentialKind,
+    pub scopes_json: String,
 }
 
 pub fn source_hash(session: &Session) -> Result<String> {
@@ -883,6 +1074,7 @@ fn stored_device_session_from_row(
         created_at_ms: row.get(3)?,
         last_seen_at_ms: row.get(4)?,
         revoked_at_ms: row.get(5)?,
+        scopes_json: row.get(6)?,
     })
 }
 
@@ -894,6 +1086,21 @@ fn stored_access_token_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sto
         created_at_ms: row.get(3)?,
         last_used_at_ms: row.get(4)?,
         revoked_at_ms: row.get(5)?,
+        scopes_json: row.get(6)?,
+    })
+}
+
+fn stored_share_link_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredShareLink> {
+    Ok(StoredShareLink {
+        id: row.get(0)?,
+        creator_user_id: row.get(1)?,
+        origin: row.get(2)?,
+        provider: row.get(3)?,
+        session_id: row.get(4)?,
+        created_at_ms: row.get(5)?,
+        last_used_at_ms: row.get(6)?,
+        expires_at_ms: row.get(7)?,
+        revoked_at_ms: row.get(8)?,
     })
 }
 
@@ -1027,7 +1234,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(version, SCHEMA_VERSION);
-        assert_eq!(auth_tables, 3);
+        assert_eq!(auth_tables, 4);
     }
 
     #[test]
@@ -1088,6 +1295,7 @@ mod tests {
                 user_id: "usr_1",
                 token_hash: &hash,
                 label: Some("Browser"),
+                scopes_json: r#"["sessions.read"]"#,
             })
             .unwrap();
 
@@ -1099,6 +1307,7 @@ mod tests {
         assert_eq!(session.id, "dev_1");
         assert_eq!(valid.credential_kind, AuthCredentialKind::DeviceSession);
         assert_eq!(valid.user.email, "user@example.com");
+        assert_eq!(valid.scopes_json, r#"["sessions.read"]"#);
         assert_eq!(rows.len(), 1);
         assert!(!format!("{rows:?}").contains(&token));
 
@@ -1120,6 +1329,7 @@ mod tests {
                 user_id: "usr_1",
                 name: "CI",
                 token_hash: &hash,
+                scopes_json: r#"["sessions.read"]"#,
             })
             .unwrap();
 
@@ -1131,12 +1341,49 @@ mod tests {
         assert_eq!(access.id, "tok_1");
         assert_eq!(valid.credential_kind, AuthCredentialKind::AccessToken);
         assert_eq!(valid.user.id, "usr_1");
+        assert_eq!(valid.scopes_json, r#"["sessions.read"]"#);
         assert_eq!(rows[0].name, "CI");
         assert!(!format!("{rows:?}").contains(&token));
 
         assert!(store.revoke_access_token("usr_1", "tok_1").unwrap());
         assert!(store
             .validate_access_token(&token_hash(&token))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn share_links_store_hashes_expire_and_revoke() {
+        let store = auth_store_with_user();
+        let token = generate_token("coca_share");
+        let hash = token_hash(&token);
+        let expires_at_ms = now_ms() + 60_000;
+        let link = store
+            .create_share_link(NewShareLink {
+                id: "shr_1",
+                creator_user_id: "usr_1",
+                origin: "local",
+                provider: "codex",
+                session_id: "sid",
+                token_hash: &hash,
+                expires_at_ms,
+            })
+            .unwrap();
+
+        let valid = store
+            .validate_share_link("shr_1", &token_hash(&token))
+            .unwrap()
+            .unwrap();
+        let rows = store.list_share_links("usr_1").unwrap();
+
+        assert_eq!(link.id, "shr_1");
+        assert_eq!(valid.session_id, "sid");
+        assert_eq!(rows.len(), 1);
+        assert!(!format!("{rows:?}").contains(&token));
+
+        assert!(store.revoke_share_link("usr_1", "shr_1").unwrap());
+        assert!(store
+            .validate_share_link("shr_1", &token_hash(&token))
             .unwrap()
             .is_none());
     }

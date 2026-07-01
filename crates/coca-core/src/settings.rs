@@ -3,7 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 
 use crate::launch::{LaunchMode, LaunchOptionKind};
@@ -62,9 +61,6 @@ impl Settings {
         if self.share.base_url.trim().is_empty() {
             anyhow::bail!("share base_url must not be empty");
         }
-        if self.share.token.trim().is_empty() {
-            anyhow::bail!("share token must not be empty");
-        }
         self.terminal.validate()?;
         Ok(())
     }
@@ -83,14 +79,6 @@ impl Settings {
         }
         if self.share.base_url.trim().is_empty() {
             self.share.base_url = default_share_base_url();
-            changed = true;
-        }
-        if self.share.token.trim().is_empty() {
-            self.share.token = generate_token();
-            changed = true;
-        }
-        if self.terminal.token.trim().is_empty() {
-            self.terminal.token = generate_token();
             changed = true;
         }
         changed
@@ -338,15 +326,12 @@ impl Default for AiSettings {
 pub struct ShareSettings {
     #[serde(default = "default_share_base_url")]
     pub base_url: String,
-    #[serde(default)]
-    pub token: String,
 }
 
 impl Default for ShareSettings {
     fn default() -> Self {
         Self {
             base_url: default_share_base_url(),
-            token: String::new(),
         }
     }
 }
@@ -355,23 +340,11 @@ impl Default for ShareSettings {
 pub struct TerminalSettings {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
-    pub token: String,
 }
 
 impl TerminalSettings {
     fn validate(&self) -> Result<()> {
-        if self.enabled && self.token.trim().is_empty() {
-            anyhow::bail!("terminal token must not be empty when terminal is enabled");
-        }
-        if self.token.chars().any(|ch| matches!(ch, '\r' | '\n')) {
-            anyhow::bail!("terminal token must not contain newlines");
-        }
         Ok(())
-    }
-
-    pub fn token_configured(&self) -> bool {
-        !self.token.trim().is_empty()
     }
 }
 
@@ -636,18 +609,6 @@ fn normalize_legacy_addr(addr: String) -> String {
     }
 }
 
-fn generate_token() -> String {
-    let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    let mut token = String::with_capacity(bytes.len() * 2);
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    for byte in bytes {
-        token.push(HEX[(byte >> 4) as usize] as char);
-        token.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    token
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -689,17 +650,20 @@ mod tests {
         assert!(settings.launch_default(LaunchMode::Resume, LaunchOptionKind::Yolo));
         assert!(settings.launch_default(LaunchMode::Fork, LaunchOptionKind::UseCurrentDir));
         assert_eq!(settings.share.base_url, "http://192.168.1.20:8787");
-        assert_eq!(settings.share.token, "secret");
         assert!(settings.terminal.enabled);
-        assert_eq!(settings.terminal.token, "terminal-secret");
     }
 
     #[test]
-    fn ensure_defaults_generates_share_and_terminal_tokens() {
+    fn ensure_defaults_fills_runtime_addresses_without_tokens() {
         let mut settings = Settings::default();
+        settings.gateway.bind.clear();
+        settings.daemon.socket.clear();
+        settings.daemon.terminal_socket.clear();
+        settings.ai.base_url.clear();
+        settings.ai.model.clear();
+        settings.ai.api_key_env.clear();
+        settings.share.base_url.clear();
 
-        assert!(settings.share.token.is_empty());
-        assert!(settings.terminal.token.is_empty());
         assert!(settings.ensure_defaults());
 
         assert_eq!(settings.gateway.bind, "0.0.0.0:8787");
@@ -712,19 +676,7 @@ mod tests {
         assert_eq!(settings.ai.model, "gpt-4o-mini");
         assert!(settings.ai.api_key.is_empty());
         assert_eq!(settings.share.base_url, "http://127.0.0.1:8787");
-        assert_eq!(settings.share.token.len(), 64);
-        assert!(settings
-            .share
-            .token
-            .chars()
-            .all(|ch| ch.is_ascii_hexdigit()));
-        assert_eq!(settings.terminal.token.len(), 64);
         assert!(!settings.terminal.enabled);
-        assert!(settings
-            .terminal
-            .token
-            .chars()
-            .all(|ch| ch.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -772,20 +724,15 @@ mod tests {
     }
 
     #[test]
-    fn validates_terminal_settings_and_remote_terminal_tokens() {
+    fn validates_remote_terminal_tokens() {
         let mut settings = Settings::default();
         settings.ensure_defaults();
 
         assert!(settings.validate().is_ok());
 
-        settings.terminal.token = "line\nbreak".to_string();
-        assert!(settings.validate().is_err());
-
-        settings.terminal.token.clear();
         settings.terminal.enabled = true;
-        assert!(settings.validate().is_err());
+        assert!(settings.validate().is_ok());
 
-        settings.terminal.token = "terminal-secret".to_string();
         settings.remotes.push(ConfiguredRemote {
             name: "work".to_string(),
             base_url: "http://127.0.0.1:8787".to_string(),

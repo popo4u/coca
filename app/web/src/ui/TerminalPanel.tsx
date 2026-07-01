@@ -1,14 +1,12 @@
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { GitFork, KeyRound, Maximize2, Minimize2, Plug, RefreshCw, RotateCw, Square, TerminalSquare, Trash2, Unplug } from "lucide-react";
+import { GitFork, Maximize2, Minimize2, Plug, RefreshCw, RotateCw, Square, TerminalSquare, Unplug } from "lucide-react";
 import {
   ApiClient,
   ApiError,
-  clearTerminalToken,
   openTerminalSocket,
-  saveTerminalToken,
   sendTerminalFrame
 } from "../api/client";
 import type {
@@ -29,6 +27,7 @@ type LoadState<T> =
   | { status: "error"; error: DisplayError };
 
 type ConnectionStatus = "idle" | "connecting" | "open" | "closed" | "error";
+type TerminalTheme = "one-half-dark" | "campbell" | "vintage" | "solarized-dark" | "tango-dark";
 
 type DisplayError = {
   code: string;
@@ -42,25 +41,25 @@ const defaultSize: TerminalSize = { cols: 80, rows: 24 };
 
 export function TerminalPanel({
   client,
-  readToken,
-  terminalToken,
-  onTerminalTokenChange,
+  accountToken,
   session,
   reference,
   initialAttachId = null,
   variant = "detail",
+  terminalTheme = "one-half-dark",
+  onOpenTerminal,
   onAttachReady,
   onAttachError,
   onDetach
 }: {
   client: ApiClient;
-  readToken: string;
-  terminalToken: string;
-  onTerminalTokenChange: (token: string) => void;
+  accountToken: string;
   session: SessionSummary;
   reference: SessionRef;
   initialAttachId?: string | null;
   variant?: "detail" | "live";
+  terminalTheme?: TerminalTheme;
+  onOpenTerminal?: (mode: TerminalMode) => Promise<void> | void;
   onAttachReady?: (terminal: TerminalSessionSummary) => void;
   onAttachError?: (message: string) => void;
   onDetach?: () => void;
@@ -73,14 +72,12 @@ export function TerminalPanel({
   const decoderRef = useRef(new TextDecoder());
   const lastSeqRef = useRef<number | null>(null);
   const lastSizeRef = useRef<TerminalSize>(defaultSize);
-  const [draftToken, setDraftToken] = useState("");
-  const [manualTerminalId, setManualTerminalId] = useState("");
-  const [listState, setListState] = useState<LoadState<TerminalSessionsResponse>>({ status: "idle" });
-  const [recentTerminals, setRecentTerminals] = useState<TerminalSessionSummary[]>(() => readRecentTerminals());
+  const [listState, setListState] = useState<LoadState<TerminalSessionsResponse>>({ status: "loading" });
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("idle");
   const [statusMessage, setStatusMessage] = useState("No terminal attached.");
   const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null);
   const [activeSummary, setActiveSummary] = useState<TerminalSessionSummary | null>(null);
+  const [openingMode, setOpeningMode] = useState<TerminalMode | null>(null);
   const [maximized, setMaximized] = useState(false);
   const initialAttachConsumedRef = useRef<string | null>(null);
 
@@ -94,20 +91,15 @@ export function TerminalPanel({
   }, [activeTerminalId]);
 
   const refreshTerminals = useCallback(() => {
-    if (!terminalToken) {
-      setListState({ status: "idle" });
-      return;
-    }
     setListState({ status: "loading" });
     client
-      .terminalSessions(terminalToken)
+      .terminalSessions()
       .then((data) => {
         setListState({ status: "ready", data });
         rememberTerminals(data.terminals);
-        setRecentTerminals(readRecentTerminals());
       })
       .catch((error: Error) => setListState({ status: "error", error: displayError(error) }));
-  }, [client, terminalToken]);
+  }, [client]);
 
   useEffect(() => {
     refreshTerminals();
@@ -158,7 +150,6 @@ export function TerminalPanel({
       setStatusMessage(`${summary.state.toLowerCase()} terminal ${summary.terminal_id}`);
       lastSeqRef.current = summary.last_seq;
       rememberTerminal(summary);
-      setRecentTerminals(readRecentTerminals());
       onAttachReady?.(summary);
       return;
     }
@@ -188,8 +179,8 @@ export function TerminalPanel({
   }, [onAttachError, onAttachReady, refreshTerminals]);
 
   const connectWithFrame = useCallback((frame: TerminalClientFrame, clear = false) => {
-    if (!terminalToken) {
-      setStatusMessage("Enter a terminal token before opening a terminal.");
+    if (!accountToken) {
+      setStatusMessage("Sign in before opening a terminal.");
       return;
     }
     closeSocket();
@@ -197,7 +188,7 @@ export function TerminalPanel({
     const terminal = terminalRef.current;
     if (clear) terminal?.clear();
     terminal?.focus();
-    const socket = openTerminalSocket(readToken, terminalToken);
+    const socket = openTerminalSocket(accountToken);
     socketRef.current = socket;
     setConnectionStatus("connecting");
     setStatusMessage("Connecting terminal stream...");
@@ -223,7 +214,7 @@ export function TerminalPanel({
       socketRef.current = null;
       setConnectionStatus((current) => current === "error" ? current : "closed");
     };
-  }, [closeSocket, fitAndResize, handleServerFrame, readToken, terminalToken]);
+  }, [accountToken, closeSocket, fitAndResize, handleServerFrame]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -234,12 +225,7 @@ export function TerminalPanel({
       fontSize: 13,
       convertEol: true,
       scrollback: 5000,
-      theme: {
-        background: "#0d1218",
-        foreground: "#eef5ff",
-        cursor: "#69b7ff",
-        selectionBackground: "#284861"
-      }
+      theme: terminalPalette(terminalTheme)
     });
     const fit = new FitAddon();
     terminal.loadAddon(fit);
@@ -266,18 +252,30 @@ export function TerminalPanel({
       terminalRef.current = null;
       fitRef.current = null;
     };
-  }, [closeSocket, fitAndResize]);
+  }, [closeSocket, fitAndResize, terminalTheme]);
 
   const listedTerminals = listState.status === "ready" ? listState.data.terminals : [];
-  const mergedTerminals = useMemo(
-    () => mergeTerminals(listedTerminals, recentTerminals),
-    [listedTerminals, recentTerminals]
-  );
-  const relatedTerminals = mergedTerminals.filter((terminal) => sameSession(terminal.session, reference));
-  const otherTerminals = mergedTerminals.filter((terminal) => !sameSession(terminal.session, reference));
-  const canOpenTerminal = Boolean(terminalToken);
+  const relatedRegistryTerminals = listedTerminals.filter((terminal) => sameSession(terminal.session, reference) && terminal.state !== "Exited");
+  const canOpenTerminal = Boolean(accountToken);
 
-  function openTerminal(mode: TerminalMode) {
+  async function openTerminal(mode: TerminalMode) {
+    if (!isLive && onOpenTerminal) {
+      setConnectionStatus("connecting");
+      setOpeningMode(mode);
+      setStatusMessage(`Opening ${mode.toLowerCase()} terminal...`);
+      try {
+        await onOpenTerminal(mode);
+        setStatusMessage("Terminal opened. Routing to live terminal...");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Terminal open failed.";
+        setConnectionStatus("error");
+        setStatusMessage(message);
+        onAttachError?.(message);
+      } finally {
+        setOpeningMode(null);
+      }
+      return;
+    }
     connectWithFrame({
       event: "terminal.open",
       payload: { session: reference, mode, size: currentSize() }
@@ -295,10 +293,10 @@ export function TerminalPanel({
 
   useEffect(() => {
     const id = initialAttachId?.trim();
-    if (!id || !terminalToken || initialAttachConsumedRef.current === id) return;
+    if (!id || !accountToken || initialAttachConsumedRef.current === id) return;
     initialAttachConsumedRef.current = id;
     attachTerminal(id);
-  }, [initialAttachId, terminalToken]);
+  }, [initialAttachId, accountToken]);
 
   function detachTerminal() {
     const terminalId = activeTerminalIdRef.current;
@@ -326,25 +324,6 @@ export function TerminalPanel({
     setStatusMessage(`kill requested for ${terminalId}`);
   }
 
-  function submitTerminalToken(event: FormEvent) {
-    event.preventDefault();
-    const token = draftToken.trim();
-    if (!token) return;
-    saveTerminalToken(token);
-    onTerminalTokenChange(token);
-    setDraftToken("");
-  }
-
-  function clearSavedTerminalToken() {
-    clearTerminalToken();
-    onTerminalTokenChange("");
-    setDraftToken("");
-    closeSocket();
-    setActiveTerminalId(null);
-    setActiveSummary(null);
-    setStatusMessage("Terminal token cleared.");
-  }
-
   return (
     <section className={`terminal-panel ${isLive ? "live" : "detail"} ${maximized ? "maximized" : ""}`} aria-label="Terminal">
       <header className="section-head terminal-head">
@@ -355,36 +334,13 @@ export function TerminalPanel({
         <div className="terminal-status-strip">
           <span className={`terminal-state ${connectionStatus}`}>{connectionStatus}</span>
           {activeSummary && <span className="terminal-state">{activeSummary.state.toLowerCase()}</span>}
-          <button className="icon-button" type="button" onClick={() => setMaximized((value) => !value)} aria-label={maximized ? "Restore terminal" : "Maximize terminal"}>
-            {maximized ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
-          </button>
-        </div>
-      </header>
-
-      {!isLive && (
-        <div className="terminal-access">
-          <div>
-            <strong>Terminal token</strong>
-            <span>{terminalToken ? "saved for this browser" : "required for Resume, Fork, Attach, Detach, and Kill"}</span>
-          </div>
-          {terminalToken ? (
-            <button className="icon-line secondary" type="button" onClick={clearSavedTerminalToken}>
-              <Trash2 size={16} />Clear token
+          {isLive && (
+            <button className="icon-button" type="button" onClick={() => setMaximized((value) => !value)} aria-label={maximized ? "Restore terminal" : "Maximize terminal"}>
+              {maximized ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
             </button>
-          ) : (
-            <form className="terminal-token-form" onSubmit={submitTerminalToken}>
-              <input
-                type="password"
-                value={draftToken}
-                onChange={(event) => setDraftToken(event.target.value)}
-                placeholder="Terminal token"
-                aria-label="Terminal token"
-              />
-              <button className="icon-line" type="submit"><KeyRound size={16} />Save</button>
-            </form>
           )}
         </div>
-      )}
+      </header>
 
       {!session.terminal.enabled && (
         <div className="notice terminal-notice">
@@ -396,28 +352,36 @@ export function TerminalPanel({
       <div className="terminal-action-grid">
         {!isLive && (
           <>
-            <button className="icon-line" type="button" disabled={!canResume || !canOpenTerminal} title={!canResume ? unavailableMessage : undefined} onClick={() => openTerminal("Resume")}>
+            <button className="icon-line" type="button" disabled={!canResume || !canOpenTerminal || openingMode !== null} title={!canResume ? unavailableMessage : undefined} onClick={() => openTerminal("Resume")}>
               <RotateCw size={16} />Resume
             </button>
-            <button className="icon-line" type="button" disabled={!canFork || !canOpenTerminal} title={!canFork ? unavailableMessage : undefined} onClick={() => openTerminal("Fork")}>
+            <button className="icon-line" type="button" disabled={!canFork || !canOpenTerminal || openingMode !== null} title={!canFork ? unavailableMessage : undefined} onClick={() => openTerminal("Fork")}>
               <GitFork size={16} />Fork
             </button>
           </>
         )}
-        <button className="icon-line secondary" type="button" disabled={!activeTerminalId} onClick={detachTerminal}>
-          <Unplug size={16} />Detach
-        </button>
-        <button className="icon-line danger" type="button" disabled={!activeTerminalId || connectionStatus !== "open"} onClick={killTerminal}>
-          <Square size={16} />Kill
-        </button>
+        {isLive && (
+          <>
+            <button className="icon-line secondary" type="button" disabled={!activeTerminalId} onClick={detachTerminal}>
+              <Unplug size={16} />Detach
+            </button>
+            <button className="icon-line danger" type="button" disabled={!activeTerminalId || connectionStatus !== "open"} onClick={killTerminal}>
+              <Square size={16} />Kill
+            </button>
+          </>
+        )}
       </div>
 
-      <div className="terminal-layout">
-        {!isLive && (
+      {!isLive && (
+        <div className="terminal-detail-body">
+          <div className="terminal-toolbar detail-toolbar">
+            <span><TerminalSquare size={15} />{openingMode ? `${openingMode.toLowerCase()} requested` : "runtime actions"}</span>
+            <span>{statusMessage}</span>
+          </div>
           <div className="terminal-sidebar">
             <div className="terminal-list-head">
-              <strong>Running terminals</strong>
-              <button className="icon-button" type="button" onClick={refreshTerminals} disabled={!terminalToken} aria-label="Refresh terminal sessions">
+              <strong>Related running terminals</strong>
+              <button className="icon-button" type="button" onClick={refreshTerminals} aria-label="Refresh terminal sessions">
                 <RefreshCw size={15} />
               </button>
             </div>
@@ -425,26 +389,22 @@ export function TerminalPanel({
               <TerminalErrorMessage error={listState.error} />
             )}
             {listState.status === "loading" && <p className="terminal-list-message">Loading terminal sessions...</p>}
-            {!terminalToken && <p className="terminal-list-message">Save a terminal token to load and attach sessions.</p>}
-            <TerminalList title="This session" terminals={relatedTerminals} activeTerminalId={connectionStatus === "open" ? activeTerminalId : null} onAttach={attachTerminal} />
-            <TerminalList title="Other sessions" terminals={otherTerminals} activeTerminalId={connectionStatus === "open" ? activeTerminalId : null} onAttach={attachTerminal} />
-            <form className="manual-attach" onSubmit={(event) => {
-              event.preventDefault();
-              attachTerminal(manualTerminalId);
-            }}>
-              <input value={manualTerminalId} onChange={(event) => setManualTerminalId(event.target.value)} placeholder="terminal_id" aria-label="Terminal id" />
-              <button className="icon-line" type="submit" disabled={!terminalToken || !manualTerminalId.trim()}><Plug size={16} />Attach</button>
-            </form>
+            <TerminalList title="This session" terminals={relatedRegistryTerminals} activeTerminalId={null} linkMode />
           </div>
-        )}
-        <div className="terminal-surface-wrap">
-          <div className="terminal-toolbar">
-            <span><TerminalSquare size={15} />{activeTerminalId ?? "no terminal"}</span>
-            <span>{statusMessage}</span>
-          </div>
-          <div className="terminal-surface" ref={hostRef} />
         </div>
-      </div>
+      )}
+
+      {isLive && (
+        <div className="terminal-layout">
+          <div className="terminal-surface-wrap">
+            <div className="terminal-toolbar">
+              <span><TerminalSquare size={15} />{activeTerminalId ?? "no terminal"}</span>
+              <span>{statusMessage}</span>
+            </div>
+            <div className="terminal-surface" ref={hostRef} />
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -453,12 +413,14 @@ function TerminalList({
   title,
   terminals,
   activeTerminalId,
-  onAttach
+  onAttach,
+  linkMode = false
 }: {
   title: string;
   terminals: TerminalSessionSummary[];
   activeTerminalId: string | null;
-  onAttach: (terminalId: string) => void;
+  onAttach?: (terminalId: string) => void;
+  linkMode?: boolean;
 }) {
   return (
     <div className="terminal-list">
@@ -470,9 +432,15 @@ function TerminalList({
             <strong>{terminal.terminal_id}</strong>
             <span>{terminal.mode.toLowerCase()} / {terminal.state.toLowerCase()} / {terminal.session.origin}</span>
           </div>
-          <button className="icon-button" type="button" onClick={() => onAttach(terminal.terminal_id)} disabled={activeTerminalId === terminal.terminal_id || terminal.state === "Exited"} aria-label={`Attach ${terminal.terminal_id}`}>
-            <Plug size={15} />
-          </button>
+          {linkMode ? (
+            <a className="icon-button" href={terminalLiveHash(terminal.session, terminal.terminal_id)} aria-label={`Open ${terminal.terminal_id}`}>
+              <Plug size={15} />
+            </a>
+          ) : (
+            <button className="icon-button" type="button" onClick={() => onAttach?.(terminal.terminal_id)} disabled={activeTerminalId === terminal.terminal_id || terminal.state === "Exited"} aria-label={`Attach ${terminal.terminal_id}`}>
+              <Plug size={15} />
+            </button>
+          )}
         </div>
       ))}
     </div>
@@ -515,8 +483,6 @@ function readinessLabel(code: string | null) {
   switch (code) {
     case "terminal_disabled":
       return "Terminal disabled";
-    case "missing_terminal_token":
-      return "Terminal token missing";
     case "provider_cli_missing":
       return "Provider CLI missing";
     case "daemon_unavailable":
@@ -536,8 +502,28 @@ function readinessLabel(code: string | null) {
   }
 }
 
+function terminalPalette(theme: TerminalTheme) {
+  switch (theme) {
+    case "campbell":
+      return { background: "#0c0c0c", foreground: "#cccccc", cursor: "#ffffff", selectionBackground: "#264f78" };
+    case "vintage":
+      return { background: "#000000", foreground: "#c0c0c0", cursor: "#00ff00", selectionBackground: "#333333" };
+    case "solarized-dark":
+      return { background: "#002b36", foreground: "#839496", cursor: "#93a1a1", selectionBackground: "#073642" };
+    case "tango-dark":
+      return { background: "#171a16", foreground: "#d3d7cf", cursor: "#eeeeec", selectionBackground: "#3465a4" };
+    case "one-half-dark":
+    default:
+      return { background: "#282c34", foreground: "#dcdfe4", cursor: "#61afef", selectionBackground: "#3e4451" };
+  }
+}
+
 function sameSession(left: SessionRef, right: SessionRef) {
   return left.origin === right.origin && left.provider === right.provider && left.id === right.id;
+}
+
+function terminalLiveHash(ref: SessionRef, terminalId: string) {
+  return `#/terminal/${encodeURIComponent(ref.origin)}/${encodeURIComponent(ref.provider)}/${encodeURIComponent(ref.id)}/${encodeURIComponent(terminalId)}`;
 }
 
 function mergeTerminals(primary: TerminalSessionSummary[], secondary: TerminalSessionSummary[]) {

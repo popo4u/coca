@@ -37,8 +37,11 @@ putting UI DTOs or HTML rendering in `coca-core`.
 ## Implemented Behavior
 
 - `coca web` serves built assets from `app/web/dist`.
-- Web APIs live under `/api/v1/*` and require `share.token` as a bearer token.
-- React owns sessions, config, and session detail routes.
+- Web APIs live under `/api/v1/*`; normal APIs require daemon-backed account
+  bearer tokens and route scopes.
+- Public share reads use per-link `/api/v1/share/<link-id>?share_token=...`
+  tokens with independent expiry and revocation.
+- React owns sessions, config, account/profile access, and session detail routes.
 - Session detail is split into title, metadata, and transcript sections.
 - Transcript rendering starts from `first_user_message` and uses a timeline UI
   with distinct user, assistant, context, and event treatments.

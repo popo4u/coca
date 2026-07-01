@@ -354,7 +354,7 @@ impl App {
                 let enabled = !self.settings.launch_default(mode, kind);
                 self.settings.set_launch_default(mode, kind, enabled);
             }
-            ConfigItem::GatewayBind | ConfigItem::ShareBaseUrl | ConfigItem::ShareToken => {
+            ConfigItem::GatewayBind | ConfigItem::ShareBaseUrl => {
                 self.open_config_edit(item);
                 return;
             }
@@ -368,7 +368,6 @@ impl App {
         let input = match &item {
             ConfigItem::GatewayBind => self.settings.gateway.bind.clone(),
             ConfigItem::ShareBaseUrl => self.settings.share.base_url.clone(),
-            ConfigItem::ShareToken => self.settings.share.token.clone(),
             ConfigItem::OriginLocal
             | ConfigItem::OriginRemote(_)
             | ConfigItem::LaunchDefault { .. } => String::new(),
@@ -383,7 +382,7 @@ impl App {
 
         let restart_gateway = matches!(
             &edit.item,
-            ConfigItem::GatewayBind | ConfigItem::ShareBaseUrl | ConfigItem::ShareToken
+            ConfigItem::GatewayBind | ConfigItem::ShareBaseUrl
         );
         match edit.item {
             ConfigItem::GatewayBind => {
@@ -391,9 +390,6 @@ impl App {
             }
             ConfigItem::ShareBaseUrl => {
                 self.settings.share.base_url = edit.input.trim().to_string();
-            }
-            ConfigItem::ShareToken => {
-                self.settings.share.token = edit.input.trim().to_string();
             }
             ConfigItem::OriginLocal
             | ConfigItem::OriginRemote(_)

@@ -24,19 +24,19 @@ from historical session data and is owned by `coca daemon`.
 
 The current worktree already contains a terminal integration vertical slice:
 
-- Terminal settings, generated terminal token, remote `terminal_token`, and
-  redacted summaries.
+- Terminal settings, account-scoped authorization, remote-only `terminal_token`
+  compatibility, and redacted summaries.
 - Terminal protocol envelopes and daemon terminal list/get RPC methods.
 - Daemon-owned `TerminalManager`, `TerminalSession`, attach/detach, active
   writer, scrollback, output sequence, kill, and replay behavior.
 - A `portable-pty` local backend for provider processes.
 - A daemon terminal stream socket.
-- A Web terminal WebSocket gateway that checks read token plus terminal token
-  and forwards frames to daemon.
+- A Web terminal WebSocket gateway that validates account tokens and forwards
+  scoped frames to daemon.
 - A remote terminal proxy path from local daemon to remote gateway to remote
   daemon.
-- A Web xterm-based panel with Resume, Fork, Attach, Detach, Kill, resize,
-  terminal list, and separate terminal token storage.
+- A Web xterm-based panel with Resume, Fork, Attach, Detach, Kill, resize, and
+  terminal list. It does not store a separate terminal token.
 
 Known remaining product gaps are UX clarity, structured readiness/error states,
 browser refresh behavior, and architecture vocabulary/process-boundary
@@ -77,7 +77,6 @@ stable terminal readiness state and actionable reason:
 
 - `ready`
 - `terminal_disabled`
-- `missing_terminal_token`
 - `daemon_unavailable`
 - `terminal_socket_unavailable`
 - `provider_cli_missing`
@@ -117,9 +116,12 @@ Error model:
 
 Security and sharing:
 
-- `share.token` remains read-only.
-- `terminal.token` gates write-capable terminal access.
-- Browser JavaScript never receives remote terminal tokens.
+- Browser terminal actions are authorized by daemon-backed account scopes:
+  `terminal.read`, `terminal.write`, and `terminal.kill`.
+- Local `share.token` and browser-entered `terminal.token` are superseded and
+  must not authorize normal gateway APIs.
+- Remote `terminal_token` remains server-side remote-gateway compatibility only;
+  browser JavaScript never receives it.
 - Shared/read-only pages must not show write-capable terminal controls.
 
 Deferred UX features:
@@ -196,8 +198,7 @@ Settings:
 ```json
 {
   "terminal": {
-    "enabled": false,
-    "token": "<generated>"
+    "enabled": false
   },
   "remotes": [
     {
@@ -214,7 +215,6 @@ Settings:
 Config summaries should expose capability state only:
 
 - `terminal.enabled`
-- `terminal.token_configured`
 - `terminal.daemon_available`
 - `terminal.terminal_socket_available`
 - `terminal.unavailable_code`
@@ -225,7 +225,7 @@ Config summaries should expose capability state only:
 Web terminal endpoint:
 
 ```text
-/api/v1/terminal/ws?token=<read-token>&terminal_token=<terminal-token>
+/api/v1/terminal/ws?token=<account-token>
 ```
 
 Daemon terminal stream events:
@@ -257,7 +257,6 @@ Minimum codes:
 - `invalid_json`
 - `unsupported_platform`
 - `terminal_disabled`
-- `missing_terminal_token`
 - `daemon_unavailable`
 - `terminal_socket_unavailable`
 - `remote_gateway_unreachable`
@@ -353,7 +352,7 @@ Gateway Agent:
 Web UI Agent:
 
 - Owns React/xterm UI, terminal list presentation, readiness controls,
-  structured error display, refresh behavior, and terminal token UX.
+  structured error display, refresh behavior, and account-scope terminal UX.
 - Must keep write-capable controls out of read-only/share contexts.
 
 Remote Agent:
@@ -393,11 +392,11 @@ Every subagent handoff should include:
 
 Rust tests:
 
-- Settings defaulting, validation, terminal token redaction, and remote
+- Settings defaulting, validation, account-scope authorization, and remote
   `terminal_token` redaction.
 - Terminal readiness DTOs for all unavailable states.
 - Structured terminal errors from daemon and gateway.
-- Terminal open rejects disabled terminal, missing token, missing session,
+- Terminal open rejects disabled terminal, missing account scope, missing session,
   browse-only remote, and unsupported platform.
 - `TerminalManager` keeps sessions alive across detach/reattach while daemon
   remains running.

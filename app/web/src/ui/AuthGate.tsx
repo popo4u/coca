@@ -1,12 +1,11 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { KeyRound, LockKeyhole, UserPlus } from "lucide-react";
 import { ApiClient } from "../api/client";
 import type { AuthCapabilities } from "../api/types";
 
-type AuthMode = "login" | "signup" | "legacy";
+type AuthMode = "login" | "signup";
 
 type AuthGateProps = {
-  onAuthenticated: (token: string) => void;
+  onAuthenticated: (token: string, remember: boolean) => void;
 };
 
 export function AuthGate({ onAuthenticated }: AuthGateProps) {
@@ -15,9 +14,9 @@ export function AuthGate({ onAuthenticated }: AuthGateProps) {
   const [capabilities, setCapabilities] = useState<AuthCapabilities | null>(null);
   const [capabilityError, setCapabilityError] = useState("");
   const [status, setStatus] = useState("");
+  const [rememberSession, setRememberSession] = useState(true);
   const [loginDraft, setLoginDraft] = useState({ email: "", password: "" });
-  const [signupDraft, setSignupDraft] = useState({ displayName: "", email: "", password: "", bootstrapToken: "" });
-  const [legacyToken, setLegacyToken] = useState("");
+  const [signupDraft, setSignupDraft] = useState({ displayName: "", email: "", password: "", confirmPassword: "" });
 
   useEffect(() => {
     client.authCapabilities()
@@ -32,9 +31,12 @@ export function AuthGate({ onAuthenticated }: AuthGateProps) {
   }, [client]);
 
   const emailPasswordEnabled = capabilities?.email_password?.available !== false;
-  const signupEnabled = capabilities?.signup_enabled !== false;
-  const ssoProviders = capabilities?.sso ?? [];
-  const ssoEnabled = ssoProviders.some((provider) => provider.available && provider.configured);
+  const signupEnabled = capabilities?.signup_enabled === true;
+  const signupStatus = capabilities && !signupEnabled
+    ? "First account already exists. Sign in instead."
+    : capabilityError
+      ? `Capabilities unavailable: ${capabilityError}`
+      : "";
 
   function submitLogin(event: FormEvent) {
     event.preventDefault();
@@ -42,7 +44,7 @@ export function AuthGate({ onAuthenticated }: AuthGateProps) {
     if (!email || !loginDraft.password) return;
     setStatus("Signing in...");
     client.login({ email, password: loginDraft.password, device_label: browserDeviceName() })
-      .then((session) => onAuthenticated(session.session_token))
+      .then((session) => onAuthenticated(session.session_token, rememberSession))
       .catch((error: Error) => setStatus(error.message));
   }
 
@@ -50,23 +52,23 @@ export function AuthGate({ onAuthenticated }: AuthGateProps) {
     event.preventDefault();
     const email = signupDraft.email.trim();
     const displayName = signupDraft.displayName.trim();
-    const bootstrapToken = signupDraft.bootstrapToken.trim();
-    if (!email || !displayName || !signupDraft.password || !bootstrapToken) return;
+    if (!signupEnabled) {
+      setStatus(signupStatus || "Account creation is not available on this gateway.");
+      return;
+    }
+    if (!email || !displayName || !signupDraft.password) return;
+    if (signupDraft.password !== signupDraft.confirmPassword) {
+      setStatus("Passwords do not match.");
+      return;
+    }
     setStatus("Creating account...");
     client.signup({
       email,
       password: signupDraft.password,
       display_name: displayName,
-      bootstrap_token: bootstrapToken,
       device_label: browserDeviceName()
-    }).then((session) => onAuthenticated(session.session_token))
+    }).then((session) => onAuthenticated(session.session_token, rememberSession))
       .catch((error: Error) => setStatus(error.message));
-  }
-
-  function submitLegacy(event: FormEvent) {
-    event.preventDefault();
-    const token = legacyToken.trim();
-    if (token) onAuthenticated(token);
   }
 
   return (
@@ -76,87 +78,48 @@ export function AuthGate({ onAuthenticated }: AuthGateProps) {
           <div className="mark">c</div>
           <div>
             <b>coca</b>
-            <span>coder-agent session workspace</span>
+            <span>{mode === "login" ? "coder-agent session workspace" : "secure session continuity"}</span>
           </div>
-        </div>
-        <div className="auth-tabs" role="tablist" aria-label="Sign in method">
-          <button className={mode === "login" ? "active" : ""} type="button" onClick={() => setMode("login")}>Sign in</button>
-          <button className={mode === "signup" ? "active" : ""} type="button" onClick={() => setMode("signup")}>First user</button>
-          <button className={mode === "legacy" ? "active" : ""} type="button" onClick={() => setMode("legacy")}>Gateway token</button>
         </div>
         {mode === "login" && (
           <>
             <h1>Sign in to your workspace</h1>
-            <p>Use your account credentials for session browsing and profile security. Terminal write actions still require a separate daemon-backed token.</p>
+            <p>Open normalized agent sessions, inspect transcripts, and continue work through authorized terminal runtimes.</p>
             <form onSubmit={submitLogin}>
-              <label className="field">
-                <span>Email</span>
-                <input type="email" value={loginDraft.email} onChange={(event) => setLoginDraft({ ...loginDraft, email: event.target.value })} autoFocus autoComplete="email" disabled={!emailPasswordEnabled} />
-              </label>
-              <label className="field">
-                <span>Password</span>
-                <input type="password" value={loginDraft.password} onChange={(event) => setLoginDraft({ ...loginDraft, password: event.target.value })} autoComplete="current-password" disabled={!emailPasswordEnabled} />
-              </label>
-              <button className="btn primary" type="submit" disabled={!emailPasswordEnabled}><LockKeyhole size={16} /> Sign in</button>
+              <div className="field">
+                <label htmlFor="auth-email">Email</label>
+                <input id="auth-email" type="email" value={loginDraft.email} onChange={(event) => setLoginDraft({ ...loginDraft, email: event.target.value })} autoFocus autoComplete="email" disabled={!emailPasswordEnabled} />
+              </div>
+              <div className="field">
+                <label htmlFor="auth-password">Password</label>
+                <input id="auth-password" type="password" value={loginDraft.password} onChange={(event) => setLoginDraft({ ...loginDraft, password: event.target.value })} autoComplete="current-password" disabled={!emailPasswordEnabled} />
+              </div>
+              <div className="checkline">
+                <RememberSession checked={rememberSession} onChange={setRememberSession} label="Remember me" />
+                <button className="link-btn" type="button" onClick={() => setStatus("Password recovery is not configured on this gateway.")}>Forgot password</button>
+              </div>
+              <button className="btn primary" type="submit" disabled={!emailPasswordEnabled}>Sign in</button>
             </form>
+            <div className="auth-switch">No account? <button className="link-btn" type="button" onClick={() => { setMode("signup"); setStatus(""); }}>Create a developer workspace</button></div>
           </>
         )}
         {mode === "signup" && (
           <>
-            <h1>Create the first account</h1>
-            <p>Use the bootstrap/share token once to register the first workspace user on this gateway.</p>
+            <h1>Create account</h1>
+            <p>Set up scoped access for read-only transcripts and write-capable terminal runtime operations.</p>
             <form onSubmit={submitSignup}>
-              <label className="field"><span>Display name</span><input value={signupDraft.displayName} onChange={(event) => setSignupDraft({ ...signupDraft, displayName: event.target.value })} autoComplete="name" disabled={!signupEnabled} /></label>
-              <label className="field"><span>Email</span><input type="email" value={signupDraft.email} onChange={(event) => setSignupDraft({ ...signupDraft, email: event.target.value })} autoComplete="email" disabled={!signupEnabled} /></label>
-              <label className="field"><span>Password</span><input type="password" value={signupDraft.password} onChange={(event) => setSignupDraft({ ...signupDraft, password: event.target.value })} autoComplete="new-password" disabled={!signupEnabled} /></label>
-              <label className="field"><span>Bootstrap token</span><input type="password" value={signupDraft.bootstrapToken} onChange={(event) => setSignupDraft({ ...signupDraft, bootstrapToken: event.target.value })} autoComplete="one-time-code" disabled={!signupEnabled} /></label>
-              <button className="btn primary" type="submit" disabled={!signupEnabled}><UserPlus size={16} /> Create account</button>
+              <div className="field"><label htmlFor="signup-name">Full name</label><input id="signup-name" value={signupDraft.displayName} onChange={(event) => setSignupDraft({ ...signupDraft, displayName: event.target.value })} autoComplete="name" disabled={!signupEnabled} /></div>
+              <div className="field"><label htmlFor="signup-email">Email</label><input id="signup-email" type="email" value={signupDraft.email} onChange={(event) => setSignupDraft({ ...signupDraft, email: event.target.value })} autoComplete="email" disabled={!signupEnabled} /></div>
+              <div className="field"><label htmlFor="signup-password">Password</label><input id="signup-password" type="password" value={signupDraft.password} onChange={(event) => setSignupDraft({ ...signupDraft, password: event.target.value })} autoComplete="new-password" disabled={!signupEnabled} /></div>
+              <div className="field"><label htmlFor="signup-confirm-password">Confirm password</label><input id="signup-confirm-password" type="password" value={signupDraft.confirmPassword} onChange={(event) => setSignupDraft({ ...signupDraft, confirmPassword: event.target.value })} autoComplete="new-password" disabled={!signupEnabled} /></div>
+              <button className="btn primary" type="submit" disabled={!signupEnabled}>Create account</button>
             </form>
+            {signupStatus && <div className="save-status auth-status">{signupStatus}</div>}
+            <div className="auth-switch">Already have access? <button className="link-btn" type="button" onClick={() => { setMode("login"); setStatus(""); }}>Sign in</button></div>
           </>
         )}
-        {mode === "legacy" && (
-          <>
-            <h1>Use a local gateway token</h1>
-            <p>Legacy token mode keeps account features unavailable and preserves terminal token entry as a separate control.</p>
-            <form onSubmit={submitLegacy}>
-              <label className="field">
-                <span>Gateway access token</span>
-                <input type="password" value={legacyToken} onChange={(event) => setLegacyToken(event.target.value)} autoComplete="current-password" />
-              </label>
-              <button className="btn primary" type="submit"><KeyRound size={16} /> Continue</button>
-            </form>
-          </>
-        )}
-        <div className="sso-row" aria-label="SSO providers">
-          {["GitHub", "Google"].map((provider) => (
-            <button className="btn" type="button" disabled={!ssoEnabled || !ssoProviderEnabled(ssoProviders, provider)} key={provider}>
-              SSO: {provider}
-            </button>
-          ))}
-        </div>
-        <div className="auth-switch">
-          {capabilityError ? `Capabilities unavailable: ${capabilityError}` : ssoEnabled ? "SSO is available from this gateway." : "SSO is not configured on this gateway."}
-          {status && <div className="save-status">{status}</div>}
-        </div>
+        {status && <div className="save-status auth-status">{status}</div>}
       </section>
-      <aside className="auth-side">
-        <div>
-          <h2>Runtime boundary is explicit</h2>
-          <p>The browser is a workbench. The gateway authorizes API and socket access; the daemon owns terminal processes.</p>
-          <div className="boundary">
-            <div className="node"><b>Browser</b><span>Read transcripts, request attaches, inspect provenance.</span></div>
-            <div className="arrow" />
-            <div className="node"><b>Gateway</b><span>Authenticates account or legacy token requests and forwards runtime streams.</span></div>
-            <div className="arrow" />
-            <div className="node"><b>Daemon</b><span>Owns terminal lifecycle and provider CLI processes.</span></div>
-          </div>
-        </div>
-        <div className="auth-log">
-          <div>scope: transcript.read sessions.browse</div>
-          <div>account: profile security devices tokens</div>
-          <div>write: terminal actions require daemon token</div>
-        </div>
-      </aside>
     </main>
   );
 }
@@ -166,7 +129,11 @@ function browserDeviceName() {
   return `${navigator.platform || "browser"} ${browser}`;
 }
 
-function ssoProviderEnabled(providers: NonNullable<AuthCapabilities["sso"]>, provider: string) {
-  const target = provider.toLowerCase();
-  return providers.some((item) => item.provider.toLowerCase() === target && item.available && item.configured);
+function RememberSession({ checked, onChange, label }: { checked: boolean; onChange: (value: boolean) => void; label: string }) {
+  return (
+    <label>
+      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+      <span>{label}</span>
+    </label>
+  );
 }

@@ -315,7 +315,7 @@ impl App {
             section("Session"),
             item("Space", "Expand or collapse details"),
             item("t", "Open transcript"),
-            item("u", "Show read-only share URL for local session"),
+            item("u", "Show Web share-link guidance"),
             item("h/l, Left/Right, PageUp/PageDown", "Page transcript"),
             item("Enter", "Resume selected local session"),
             item("s", "Execute selected local session with options"),
@@ -368,9 +368,7 @@ impl App {
                 lines.push(Line::raw(""));
                 gateway_header_added = true;
             }
-            if matches!(item, ConfigItem::ShareBaseUrl | ConfigItem::ShareToken)
-                && !share_header_added
-            {
+            if matches!(item, ConfigItem::ShareBaseUrl) && !share_header_added {
                 lines.push(Line::raw(""));
                 lines.push(Line::styled(
                     "Share",
@@ -464,7 +462,7 @@ impl App {
             ConfigItem::OriginRemote(name) => self.settings.remote_enabled(name),
             ConfigItem::GatewayBind => false,
             ConfigItem::LaunchDefault { mode, kind } => self.settings.launch_default(*mode, *kind),
-            ConfigItem::ShareBaseUrl | ConfigItem::ShareToken => false,
+            ConfigItem::ShareBaseUrl => false,
         }
     }
 
@@ -476,14 +474,6 @@ impl App {
             ConfigItem::ShareBaseUrl => format!(
                 "share base URL: {}",
                 display_setting_value(&self.settings.share.base_url)
-            ),
-            ConfigItem::ShareToken => format!(
-                "share token: {}",
-                if self.settings.share.token.is_empty() {
-                    "<empty>"
-                } else {
-                    "<set>"
-                }
             ),
             ConfigItem::LaunchDefault { mode, kind } => {
                 let key = match mode {
@@ -503,7 +493,6 @@ impl App {
         match item {
             ConfigItem::GatewayBind => "gateway.bind",
             ConfigItem::ShareBaseUrl => "share.base_url",
-            ConfigItem::ShareToken => "share.token",
             ConfigItem::OriginLocal
             | ConfigItem::OriginRemote(_)
             | ConfigItem::LaunchDefault { .. } => "setting",
@@ -514,7 +503,6 @@ impl App {
         match item {
             ConfigItem::GatewayBind => "Example: 0.0.0.0:8787",
             ConfigItem::ShareBaseUrl => "Example: http://192.168.1.20:8787",
-            ConfigItem::ShareToken => "Used by coca gateway for API and share links.",
             ConfigItem::OriginLocal
             | ConfigItem::OriginRemote(_)
             | ConfigItem::LaunchDefault { .. } => "",

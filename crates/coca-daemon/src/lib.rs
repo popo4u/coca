@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 use coca_app::{
     AccessTokenCreateInput, AccessTokenCreateResponse, AccessTokensResponse, AccountMe,
     AccountPasswordUpdateInput, AccountProfileUpdateInput, AiSettingsUpdate, AppOptions,
-    AppService, AuthCapabilities, AuthLoginInput, AuthSessionResponse, AuthSignupInput,
-    AuthValidation, DeviceSessionsResponse, RevokeResponse,
+    AppService, AuthCapabilities, AuthLoginInput, AuthScope, AuthSessionResponse, AuthSignupInput,
+    AuthValidation, DeviceSessionsResponse, PublicShareDetail, RevokeResponse, ShareLinksResponse,
 };
 use coca_core::catalog::SessionCatalog;
 use coca_core::launch::{LaunchMode, LaunchOption, LaunchOptionKind};
@@ -16,13 +16,13 @@ use coca_core::model::{ProviderFilter, ProviderKind, Session, SessionOrigin};
 use coca_core::settings::{save_settings, Settings};
 use coca_protocol::{
     methods, AccountDevicesRevokeParams, AccountPasswordUpdateParams, AccountProfileUpdateParams,
-    AccountSubjectParams, AccountTokensCreateParams, AccountTokensRevokeParams,
-    AiSettingsUpdateParams, AuthLoginParams, AuthLogoutParams, AuthSignupParams,
-    AuthValidateParams, DaemonPingResult, JsonRpcRequest, JsonRpcResponse, LaunchModeWire,
-    LaunchOptionKindWire, LaunchOptionWire, LaunchOptionsParams, LaunchPrepareParams,
-    PreparedLaunch, RpcId, SessionGetParams, SessionRef, SettingsSummaryParams,
-    SettingsUpdateParams, ShareUrlParams, TerminalGetParams, TerminalId, TerminalListResult,
-    TerminalModeWire, TerminalOpen, TerminalSessionSummary,
+    AccountShareLinksRevokeParams, AccountSubjectParams, AccountTokensCreateParams,
+    AccountTokensRevokeParams, AiSettingsUpdateParams, AuthLoginParams, AuthLogoutParams,
+    AuthSignupParams, AuthValidateParams, DaemonPingResult, JsonRpcRequest, JsonRpcResponse,
+    LaunchModeWire, LaunchOptionKindWire, LaunchOptionWire, LaunchOptionsParams,
+    LaunchPrepareParams, PreparedLaunch, PublicShareDetailParams, RpcId, SessionGetParams,
+    SessionRef, SettingsSummaryParams, SettingsUpdateParams, ShareUrlParams, TerminalGetParams,
+    TerminalId, TerminalListResult, TerminalModeWire, TerminalOpen, TerminalSessionSummary,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
@@ -31,6 +31,17 @@ use crate::terminal::{
     DaemonTerminalBackend, TerminalBackend, TerminalLaunchTarget, TerminalManager,
     TerminalRuntimeError,
 };
+
+#[cfg(test)]
+const ACCOUNT_AUTH_SCOPES: &[&str] = &[
+    "sessions.read",
+    "share.manage",
+    "account.manage",
+    "tokens.manage",
+    "terminal.read",
+    "terminal.write",
+    "terminal.kill",
+];
 
 #[cfg(unix)]
 pub fn serve_rpc(socket_path: &std::path::Path, options: RpcDaemonOptions) -> Result<()> {
@@ -302,15 +313,17 @@ where
                 serde_json::to_value(summary)
             }
             methods::SHARE_URL => {
-                let params: ShareUrlParams = parse_params(request.params)?;
+                let params: ShareUrlDispatchParams = parse_params(request.params)?;
                 self.find_session(&params.session)?
                     .ok_or_else(|| RpcDispatchError::not_found("session not found"))?;
-                let url = self
+                let user_id = params.user_id.ok_or_else(|| {
+                    RpcDispatchError::invalid_params("share.url requires authenticated user_id")
+                })?;
+                let link = self
                     .app()
-                    .share_session(&app_session_ref(&params.session))
-                    .map_err(RpcDispatchError::from_anyhow)?
-                    .url;
-                Ok(json!({ "url": url }))
+                    .share_session(&user_id, &app_session_ref(&params.session))
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(link)
             }
             methods::LAUNCH_OPTIONS => {
                 let params: LaunchOptionsParams = parse_params(request.params)?;
@@ -367,7 +380,6 @@ where
                         password: params.password,
                         display_name: params.display_name,
                         device_label: params.device_label,
-                        bootstrap_token: params.bootstrap_token,
                     })
                     .map_err(RpcDispatchError::from_anyhow)?;
                 serde_json::to_value(value)
@@ -390,7 +402,7 @@ where
                     .app()
                     .auth_validate(&params.token)
                     .map_err(RpcDispatchError::from_anyhow)?;
-                serde_json::to_value(value)
+                auth_validation_response(value)
             }
             methods::AUTH_LOGOUT => {
                 let params: AuthLogoutParams = parse_params(request.params)?;
@@ -465,7 +477,10 @@ where
                     .app()
                     .create_account_token(
                         &params.user_id,
-                        AccessTokenCreateInput { name: params.name },
+                        AccessTokenCreateInput {
+                            name: params.name,
+                            scopes: auth_scopes(params.scopes),
+                        },
                     )
                     .map_err(RpcDispatchError::from_anyhow)?;
                 serde_json::to_value(value)
@@ -475,6 +490,30 @@ where
                 let value = self
                     .app()
                     .revoke_account_token(&params.user_id, &params.token_id)
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(value)
+            }
+            methods::ACCOUNT_SHARE_LINKS_LIST => {
+                let params: AccountSubjectParams = parse_params(request.params)?;
+                let value = self
+                    .app()
+                    .account_share_links(&params.user_id)
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(value)
+            }
+            methods::ACCOUNT_SHARE_LINKS_REVOKE => {
+                let params: AccountShareLinksRevokeParams = parse_params(request.params)?;
+                let value = self
+                    .app()
+                    .revoke_account_share_link(&params.user_id, &params.link_id)
+                    .map_err(RpcDispatchError::from_anyhow)?;
+                serde_json::to_value(value)
+            }
+            methods::SHARE_PUBLIC_DETAIL => {
+                let params: PublicShareDetailParams = parse_params(request.params)?;
+                let value = self
+                    .app()
+                    .public_share_detail(&params.link_id, &params.token)
                     .map_err(RpcDispatchError::from_anyhow)?;
                 serde_json::to_value(value)
             }
@@ -694,6 +733,27 @@ where
         self.call(methods::ACCOUNT_TOKENS_REVOKE, to_params(params)?)
     }
 
+    pub fn account_share_links(&mut self, user_id: String) -> Result<ShareLinksResponse> {
+        self.call(
+            methods::ACCOUNT_SHARE_LINKS_LIST,
+            to_params(AccountSubjectParams { user_id })?,
+        )
+    }
+
+    pub fn account_share_link_revoke(
+        &mut self,
+        params: AccountShareLinksRevokeParams,
+    ) -> Result<RevokeResponse> {
+        self.call(methods::ACCOUNT_SHARE_LINKS_REVOKE, to_params(params)?)
+    }
+
+    pub fn public_share_detail(
+        &mut self,
+        params: PublicShareDetailParams,
+    ) -> Result<Option<PublicShareDetail>> {
+        self.call(methods::SHARE_PUBLIC_DETAIL, to_params(params)?)
+    }
+
     fn call<T>(&mut self, method: &str, params: Option<Value>) -> Result<T>
     where
         T: DeserializeOwned,
@@ -793,6 +853,13 @@ where
         .map_err(|err| RpcDispatchError::invalid_params(err.to_string()))
 }
 
+#[derive(serde::Deserialize)]
+struct ShareUrlDispatchParams {
+    session: SessionRef,
+    #[serde(default)]
+    user_id: Option<String>,
+}
+
 fn provider_kind(provider: &str) -> Option<ProviderKind> {
     match provider {
         "codex" => Some(ProviderKind::Codex),
@@ -826,6 +893,28 @@ fn ai_settings_update(params: AiSettingsUpdateParams) -> AiSettingsUpdate {
         api_key: params.api_key,
         clear_api_key: params.clear_api_key,
     }
+}
+
+fn auth_validation_response(
+    validation: Option<AuthValidation>,
+) -> std::result::Result<Value, serde_json::Error> {
+    serde_json::to_value(validation)
+}
+
+fn auth_scopes(scopes: Vec<String>) -> Vec<AuthScope> {
+    scopes
+        .into_iter()
+        .filter_map(|scope| match scope.as_str() {
+            "sessions.read" => Some(AuthScope::SessionsRead),
+            "share.manage" => Some(AuthScope::ShareManage),
+            "account.manage" => Some(AuthScope::AccountManage),
+            "tokens.manage" => Some(AuthScope::TokensManage),
+            "terminal.read" => Some(AuthScope::TerminalRead),
+            "terminal.write" => Some(AuthScope::TerminalWrite),
+            "terminal.kill" => Some(AuthScope::TerminalKill),
+            _ => None,
+        })
+        .collect()
 }
 
 fn launch_mode(mode: LaunchModeWire) -> LaunchMode {
@@ -951,7 +1040,6 @@ mod tests {
     fn settings_summary_marks_daemon_runtime_available() {
         let mut options = test_options();
         options.settings.terminal.enabled = true;
-        options.settings.terminal.token = "terminal-secret".to_string();
         let mut client = LocalRpcClient::new(options);
 
         let summary = client
@@ -964,7 +1052,6 @@ mod tests {
         assert_eq!(summary.bind, "127.0.0.1:8787");
         assert!(summary.terminal.daemon_available);
         assert!(summary.terminal.terminal_socket_available);
-        assert!(summary.terminal.token_configured);
         let body = serde_json::to_string(&summary).unwrap();
         assert!(!body.contains("terminal-secret"));
     }
@@ -975,7 +1062,6 @@ mod tests {
         let mut settings = Settings::default();
         settings.ensure_defaults();
         settings.share.base_url = "http://host:8787".to_string();
-        settings.share.token = "secret".to_string();
         settings.launch_defaults.resume.yolo = true;
 
         let updated = client.settings_update(settings.clone()).unwrap();
@@ -1075,7 +1161,6 @@ mod tests {
     fn auth_rpc_flow_uses_daemon_database_path() {
         let dir = tempfile::tempdir().unwrap();
         let mut options = test_options();
-        options.settings.share.token = "share-secret".to_string();
         options.database_path = Some(dir.path().join("auth.db"));
         let mut client = LocalRpcClient::new(options);
 
@@ -1089,7 +1174,6 @@ mod tests {
                 password: "password".to_string(),
                 display_name: Some(" User ".to_string()),
                 device_label: Some("Browser".to_string()),
-                bootstrap_token: Some("share-secret".to_string()),
             })
             .unwrap();
         let validation = client
@@ -1098,6 +1182,17 @@ mod tests {
             .expect("valid session token");
         assert_eq!(validation.user.email, "user@example.com");
         assert_eq!(validation.user.display_name.as_deref(), Some("User"));
+        let validation_value =
+            daemon_auth_validate_value(&mut client, signup.session_token.clone());
+        assert_eq!(
+            validation_value["scopes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>(),
+            ACCOUNT_AUTH_SCOPES
+        );
         assert!(!client.auth_capabilities().unwrap().signup_enabled);
 
         let me = client.account_me(validation.user.id.clone()).unwrap();
@@ -1107,6 +1202,7 @@ mod tests {
             .account_token_create(AccountTokensCreateParams {
                 user_id: validation.user.id.clone(),
                 name: "CI".to_string(),
+                scopes: vec!["sessions.read".to_string(), "terminal.read".to_string()],
             })
             .unwrap();
         assert!(created.plaintext_token.starts_with("coca_pat_"));
@@ -1149,13 +1245,18 @@ mod tests {
         let mut settings = Settings::default();
         settings.ensure_defaults();
         let (codex_home, claude_home) = empty_provider_roots();
+        let database_root = codex_home
+            .parent()
+            .expect("empty provider root should include a parent")
+            .to_path_buf();
+        std::fs::create_dir_all(&database_root).unwrap();
         RpcDaemonOptions {
             settings,
             settings_path: None,
             codex_home: Some(codex_home),
             claude_home: Some(claude_home),
             provider_filter: ProviderFilter::All,
-            database_path: None,
+            database_path: Some(database_root.join("coca.db")),
         }
     }
 
@@ -1165,6 +1266,15 @@ mod tests {
             provider: "codex".to_string(),
             id: "missing".to_string(),
         }
+    }
+
+    fn daemon_auth_validate_value(client: &mut LocalRpcClient, token: String) -> serde_json::Value {
+        client
+            .call::<serde_json::Value>(
+                methods::AUTH_VALIDATE,
+                to_params(AuthValidateParams { token }).unwrap(),
+            )
+            .unwrap()
     }
 
     fn empty_provider_roots() -> (PathBuf, PathBuf) {

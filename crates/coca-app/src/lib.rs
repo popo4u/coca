@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use chrono::{DateTime, Local};
@@ -12,10 +13,13 @@ use coca_core::model::{ProviderFilter, ProviderKind, Session, SessionOrigin};
 use coca_core::settings::{save_settings, AiSettings, Settings};
 use coca_core::storage::{
     default_database_path, generate_id, generate_token, hash_password, normalize_email, token_hash,
-    verify_password, AuthCredentialKind, DerivedStore, NewAccessToken, NewDeviceSession, NewUser,
-    StoredAccessToken, StoredAuthCredential, StoredDeviceSession, StoredUser,
+    verify_password, AuthCredentialKind, DerivedStore, NewAccessToken, NewDeviceSession,
+    NewShareLink, NewUser, StoredAccessToken, StoredAuthCredential, StoredDeviceSession,
+    StoredShareLink, StoredUser,
 };
 use serde::{Deserialize, Serialize};
+
+const SHARE_LINK_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Clone, Debug)]
 pub struct AppOptions {
@@ -156,14 +160,14 @@ impl AppService {
         }))
     }
 
-    pub fn share_session(&self, reference: &SessionRef) -> Result<ShareLink> {
+    pub fn share_session(&self, user_id: &str, reference: &SessionRef) -> Result<ShareLink> {
         let session = self
             .session(reference)?
             .ok_or_else(|| anyhow::anyhow!("session not found"))?;
-        self.share_link_for_session(&session)
+        self.share_link_for_session(user_id, &session)
     }
 
-    pub fn share_link_for_session(&self, session: &Session) -> Result<ShareLink> {
+    pub fn share_link_for_session(&self, user_id: &str, session: &Session) -> Result<ShareLink> {
         if !session.is_local() {
             anyhow::bail!(
                 "Remote sessions cannot be shared from this machine in v0: {}",
@@ -171,20 +175,33 @@ impl AppService {
             );
         }
         let base_url = self.options.settings.share.base_url.trim();
-        let token = self.options.settings.share.token.trim();
-        if base_url.is_empty() || token.is_empty() {
-            anyhow::bail!("share base_url and token must be configured");
+        if base_url.is_empty() {
+            anyhow::bail!("share base_url must be configured");
         }
         let reference = session_ref_from_session(session);
+        let plaintext = generate_token("coca_share");
+        let token_hash = token_hash(&plaintext);
+        let expires_at_ms = now_ms() + SHARE_LINK_TTL_MS;
+        let store = self.auth_store()?;
+        let link = store.create_share_link(NewShareLink {
+            id: &generate_id("shr"),
+            creator_user_id: user_id,
+            origin: &reference.origin,
+            provider: &reference.provider,
+            session_id: &reference.id,
+            token_hash: &token_hash,
+            expires_at_ms,
+        })?;
+        let url = format!(
+            "{}/#/share/{}?share_token={}",
+            base_url.trim_end_matches('/'),
+            percent_encode(&link.id),
+            percent_encode(&plaintext),
+        );
         Ok(ShareLink {
-            url: format!(
-                "{}/?token={}#/session/{}/{}/{}",
-                base_url.trim_end_matches('/'),
-                percent_encode(token),
-                percent_encode(&reference.origin),
-                percent_encode(&reference.provider),
-                percent_encode(&reference.id),
-            ),
+            id: link.id,
+            url,
+            expires_at_ms,
         })
     }
 
@@ -249,7 +266,6 @@ impl AppService {
                 reason: None,
             },
             signup_enabled: user_count == 0,
-            signup_requires_bootstrap_token: user_count == 0,
             sso: vec![SsoCapability {
                 provider: "oidc".to_string(),
                 available: false,
@@ -267,13 +283,6 @@ impl AppService {
         if store.user_count()? > 0 {
             anyhow::bail!("signup is disabled after the first account is created");
         }
-        let expected_bootstrap = self.options.settings.share.token.trim();
-        if expected_bootstrap.is_empty()
-            || input.bootstrap_token.as_deref().map(str::trim) != Some(expected_bootstrap)
-        {
-            anyhow::bail!("bootstrap token is required for first signup");
-        }
-
         let password_hash = hash_password(&input.password)?;
         let user = store.create_user(NewUser {
             id: &generate_id("usr"),
@@ -405,11 +414,16 @@ impl AppService {
         let store = self.auth_store()?;
         let plaintext = generate_token("coca_pat");
         let hash = token_hash(&plaintext);
+        if input.scopes.is_empty() {
+            anyhow::bail!("access token scopes must not be empty");
+        }
+        let scopes_json = encode_scopes(&input.scopes)?;
         let token = store.create_access_token(NewAccessToken {
             id: &generate_id("tok"),
             user_id,
             name,
             token_hash: &hash,
+            scopes_json: &scopes_json,
         })?;
         Ok(AccessTokenCreateResponse {
             token: AccessTokenDto::from(token),
@@ -422,6 +436,51 @@ impl AppService {
         Ok(RevokeResponse {
             revoked: store.revoke_access_token(user_id, token_id)?,
         })
+    }
+
+    pub fn account_share_links(&self, user_id: &str) -> Result<ShareLinksResponse> {
+        let store = self.auth_store()?;
+        Ok(ShareLinksResponse {
+            links: store
+                .list_share_links(user_id)?
+                .into_iter()
+                .map(ShareLinkDto::from)
+                .collect(),
+        })
+    }
+
+    pub fn revoke_account_share_link(
+        &self,
+        user_id: &str,
+        link_id: &str,
+    ) -> Result<RevokeResponse> {
+        let store = self.auth_store()?;
+        Ok(RevokeResponse {
+            revoked: store.revoke_share_link(user_id, link_id)?,
+        })
+    }
+
+    pub fn public_share_detail(
+        &self,
+        link_id: &str,
+        token: &str,
+    ) -> Result<Option<PublicShareDetail>> {
+        let store = self.auth_store()?;
+        let Some(link) = store.validate_share_link(link_id, &token_hash(token.trim()))? else {
+            return Ok(None);
+        };
+        let reference = SessionRef {
+            origin: link.origin.clone(),
+            provider: link.provider.clone(),
+            id: link.session_id.clone(),
+        };
+        let Some(session) = self.web_session_detail(&reference)? else {
+            return Ok(None);
+        };
+        Ok(Some(PublicShareDetail {
+            link: ShareLinkDto::from(link),
+            session,
+        }))
     }
 
     fn store_catalog(&self, sessions: &[Session]) -> Result<()> {
@@ -447,11 +506,13 @@ impl AppService {
     ) -> Result<AuthSessionResponse> {
         let session_token = generate_token("coca_sess");
         let session_token_hash = token_hash(&session_token);
+        let scopes_json = encode_scopes(&AuthScope::all())?;
         let session = store.create_device_session(NewDeviceSession {
             id: &generate_id("dev"),
             user_id: &user.id,
             token_hash: &session_token_hash,
             label: trimmed_optional(label).as_deref(),
+            scopes_json: &scopes_json,
         })?;
         Ok(AuthSessionResponse {
             user: AccountUser::from(user),
@@ -644,7 +705,6 @@ impl ConfigSummary {
             ai: AiSummary::from_settings(&settings.ai),
             share: ShareSummary {
                 base_url: settings.share.base_url.clone(),
-                token_configured: !settings.share.token.trim().is_empty(),
             },
             terminal: TerminalConfigSummary::from_settings(settings),
             remotes: settings
@@ -728,7 +788,6 @@ pub struct AiSettingsUpdate {
 pub struct AuthCapabilities {
     pub email_password: AuthProviderCapability,
     pub signup_enabled: bool,
-    pub signup_requires_bootstrap_token: bool,
     pub sso: Vec<SsoCapability>,
 }
 
@@ -753,7 +812,6 @@ pub struct AuthSignupInput {
     pub password: String,
     pub display_name: Option<String>,
     pub device_label: Option<String>,
-    pub bootstrap_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -761,6 +819,46 @@ pub struct AuthLoginInput {
     pub email: String,
     pub password: String,
     pub device_label: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum AuthScope {
+    #[serde(rename = "sessions.read")]
+    SessionsRead,
+    #[serde(rename = "share.manage")]
+    ShareManage,
+    #[serde(rename = "account.manage")]
+    AccountManage,
+    #[serde(rename = "tokens.manage")]
+    TokensManage,
+    #[serde(rename = "terminal.read")]
+    TerminalRead,
+    #[serde(rename = "terminal.write")]
+    TerminalWrite,
+    #[serde(rename = "terminal.kill")]
+    TerminalKill,
+}
+
+impl AuthScope {
+    pub fn all() -> Vec<Self> {
+        vec![
+            Self::SessionsRead,
+            Self::ShareManage,
+            Self::AccountManage,
+            Self::TokensManage,
+            Self::TerminalRead,
+            Self::TerminalWrite,
+            Self::TerminalKill,
+        ]
+    }
+}
+
+fn encode_scopes(scopes: &[AuthScope]) -> Result<String> {
+    serde_json::to_string(scopes).map_err(Into::into)
+}
+
+fn decode_scopes(scopes_json: &str) -> Vec<AuthScope> {
+    serde_json::from_str(scopes_json).unwrap_or_default()
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -775,6 +873,7 @@ pub struct AuthValidation {
     pub user: AccountUser,
     pub credential_id: String,
     pub credential_kind: AuthCredentialKindDto,
+    pub scopes: Vec<AuthScope>,
 }
 
 impl AuthValidation {
@@ -783,7 +882,12 @@ impl AuthValidation {
             user: AccountUser::from(credential.user),
             credential_id: credential.credential_id,
             credential_kind: AuthCredentialKindDto::from(credential.credential_kind),
+            scopes: decode_scopes(&credential.scopes_json),
         }
+    }
+
+    pub fn has_scope(&self, scope: AuthScope) -> bool {
+        self.scopes.contains(&scope)
     }
 }
 
@@ -851,6 +955,7 @@ pub struct DeviceSessionDto {
     pub created_at_ms: i64,
     pub last_seen_at_ms: i64,
     pub revoked_at_ms: Option<i64>,
+    pub scopes: Vec<AuthScope>,
 }
 
 impl From<StoredDeviceSession> for DeviceSessionDto {
@@ -861,6 +966,7 @@ impl From<StoredDeviceSession> for DeviceSessionDto {
             created_at_ms: value.created_at_ms,
             last_seen_at_ms: value.last_seen_at_ms,
             revoked_at_ms: value.revoked_at_ms,
+            scopes: decode_scopes(&value.scopes_json),
         }
     }
 }
@@ -877,6 +983,7 @@ pub struct AccessTokenDto {
     pub created_at_ms: i64,
     pub last_used_at_ms: Option<i64>,
     pub revoked_at_ms: Option<i64>,
+    pub scopes: Vec<AuthScope>,
 }
 
 impl From<StoredAccessToken> for AccessTokenDto {
@@ -887,6 +994,7 @@ impl From<StoredAccessToken> for AccessTokenDto {
             created_at_ms: value.created_at_ms,
             last_used_at_ms: value.last_used_at_ms,
             revoked_at_ms: value.revoked_at_ms,
+            scopes: decode_scopes(&value.scopes_json),
         }
     }
 }
@@ -894,6 +1002,7 @@ impl From<StoredAccessToken> for AccessTokenDto {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AccessTokenCreateInput {
     pub name: String,
+    pub scopes: Vec<AuthScope>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -935,13 +1044,11 @@ impl AiSummary {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ShareSummary {
     pub base_url: String,
-    pub token_configured: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TerminalConfigSummary {
     pub enabled: bool,
-    pub token_configured: bool,
     pub daemon_available: bool,
     pub terminal_socket_available: bool,
     pub unavailable_code: Option<String>,
@@ -952,7 +1059,6 @@ impl TerminalConfigSummary {
     fn from_settings(settings: &Settings) -> Self {
         Self {
             enabled: settings.terminal.enabled,
-            token_configured: settings.terminal.token_configured(),
             daemon_available: false,
             terminal_socket_available: false,
             unavailable_code: None,
@@ -972,11 +1078,6 @@ impl TerminalConfigSummary {
             Some((
                 "terminal_disabled",
                 "Terminal execution is disabled in settings.",
-            ))
-        } else if !self.token_configured {
-            Some((
-                "missing_terminal_token",
-                "Terminal token is not configured.",
             ))
         } else if !self.daemon_available {
             Some(("daemon_unavailable", "coca daemon is not available."))
@@ -1024,7 +1125,47 @@ pub struct LaunchModeDefaultsSummary {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ShareLink {
+    pub id: String,
     pub url: String,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ShareLinksResponse {
+    pub links: Vec<ShareLinkDto>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ShareLinkDto {
+    pub id: String,
+    pub session: SessionRef,
+    pub created_at_ms: i64,
+    pub last_used_at_ms: Option<i64>,
+    pub expires_at_ms: i64,
+    pub revoked_at_ms: Option<i64>,
+}
+
+impl From<StoredShareLink> for ShareLinkDto {
+    fn from(value: StoredShareLink) -> Self {
+        Self {
+            id: value.id,
+            session: SessionRef {
+                origin: value.origin,
+                provider: value.provider,
+                id: value.session_id,
+            },
+            created_at_ms: value.created_at_ms,
+            last_used_at_ms: value.last_used_at_ms,
+            expires_at_ms: value.expires_at_ms,
+            revoked_at_ms: value.revoked_at_ms,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PublicShareDetail {
+    pub link: ShareLinkDto,
+    pub session: SessionDetail,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1071,12 +1212,6 @@ impl TerminalCapability {
             return Self::unavailable(
                 "terminal_disabled",
                 "Terminal execution is disabled in settings.",
-            );
-        }
-        if !settings.terminal.token_configured() {
-            return Self::unavailable(
-                "missing_terminal_token",
-                "Terminal token is not configured.",
             );
         }
         match &session.origin {
@@ -1175,9 +1310,6 @@ fn ensure_terminal_enabled(settings: &Settings) -> Result<()> {
     if !settings.terminal.enabled {
         anyhow::bail!("terminal execution is disabled in settings");
     }
-    if !settings.terminal.token_configured() {
-        anyhow::bail!("terminal token is not configured");
-    }
     Ok(())
 }
 
@@ -1200,6 +1332,13 @@ fn trimmed_optional(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn remote_terminal_unavailable(
@@ -1285,7 +1424,6 @@ mod tests {
         let mut settings = Settings::default();
         settings.ensure_defaults();
         settings.ai.api_key = "sk-secret".to_string();
-        settings.terminal.token = "terminal-secret".to_string();
         let service = app_service(settings);
 
         let summary = service.config_summary("127.0.0.1:0").unwrap();
@@ -1295,7 +1433,6 @@ mod tests {
         assert_eq!(summary.ai.model, "gpt-4o-mini");
         assert!(summary.ai.api_key_configured);
         assert!(!body.contains("sk-secret"));
-        assert!(summary.terminal.token_configured);
         assert_eq!(
             summary.terminal.unavailable_code.as_deref(),
             Some("terminal_disabled")
@@ -1420,26 +1557,13 @@ mod tests {
     }
 
     #[test]
-    fn auth_signup_requires_bootstrap_then_disables_signup() {
+    fn auth_signup_creates_first_account_then_disables_signup() {
         let dir = tempfile::tempdir().unwrap();
-        let service = app_service_with_db(settings_with_share_token(), dir.path().join("auth.db"));
+        let service = app_service_with_db(settings_with_share_config(), dir.path().join("auth.db"));
 
         let capabilities = service.auth_capabilities().unwrap();
         assert!(capabilities.signup_enabled);
-        assert!(capabilities.signup_requires_bootstrap_token);
         assert!(!capabilities.sso[0].available);
-
-        let missing_bootstrap = service
-            .auth_signup(AuthSignupInput {
-                email: "user@example.com".to_string(),
-                password: "password".to_string(),
-                display_name: None,
-                device_label: None,
-                bootstrap_token: None,
-            })
-            .unwrap_err()
-            .to_string();
-        assert!(missing_bootstrap.contains("bootstrap token"));
 
         let response = service
             .auth_signup(AuthSignupInput {
@@ -1447,13 +1571,13 @@ mod tests {
                 password: "password".to_string(),
                 display_name: Some(" User ".to_string()),
                 device_label: Some(" Browser ".to_string()),
-                bootstrap_token: Some("share-secret".to_string()),
             })
             .unwrap();
 
         assert_eq!(response.user.email, "user@example.com");
         assert_eq!(response.user.display_name.as_deref(), Some("User"));
         assert!(response.session_token.starts_with("coca_sess_"));
+        assert_eq!(response.session.scopes, AuthScope::all());
         assert!(!serde_json::to_string(&response)
             .unwrap()
             .contains("share-secret"));
@@ -1464,7 +1588,6 @@ mod tests {
                 password: "password".to_string(),
                 display_name: None,
                 device_label: None,
-                bootstrap_token: Some("share-secret".to_string()),
             })
             .unwrap_err()
             .to_string()
@@ -1474,7 +1597,7 @@ mod tests {
     #[test]
     fn auth_login_validate_logout_and_profile_password_workflow() {
         let dir = tempfile::tempdir().unwrap();
-        let service = app_service_with_db(settings_with_share_token(), dir.path().join("auth.db"));
+        let service = app_service_with_db(settings_with_share_config(), dir.path().join("auth.db"));
         let signup = signup_user(&service);
 
         let login = service
@@ -1493,6 +1616,8 @@ mod tests {
             validation.credential_kind,
             AuthCredentialKindDto::DeviceSession
         );
+        assert_eq!(validation.scopes, AuthScope::all());
+        assert!(validation.has_scope(AuthScope::TerminalKill));
 
         let profile = service
             .update_account_profile(
@@ -1541,22 +1666,37 @@ mod tests {
     #[test]
     fn account_tokens_are_returned_plaintext_once_and_can_be_revoked() {
         let dir = tempfile::tempdir().unwrap();
-        let service = app_service_with_db(settings_with_share_token(), dir.path().join("auth.db"));
+        let service = app_service_with_db(settings_with_share_config(), dir.path().join("auth.db"));
         let signup = signup_user(&service);
         let user_id = signup.user.id.clone();
+
+        let empty_scopes = service
+            .create_account_token(
+                &user_id,
+                AccessTokenCreateInput {
+                    name: "empty".to_string(),
+                    scopes: vec![],
+                },
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(empty_scopes.contains("scopes must not be empty"));
 
         let created = service
             .create_account_token(
                 &user_id,
                 AccessTokenCreateInput {
                     name: "CI".to_string(),
+                    scopes: vec![AuthScope::SessionsRead],
                 },
             )
             .unwrap();
         assert!(created.plaintext_token.starts_with("coca_pat_"));
+        assert_eq!(created.token.scopes, vec![AuthScope::SessionsRead]);
         let listed = service.account_tokens(&user_id).unwrap();
         let listed_json = serde_json::to_string(&listed).unwrap();
         assert_eq!(listed.tokens.len(), 1);
+        assert_eq!(listed.tokens[0].scopes, vec![AuthScope::SessionsRead]);
         assert!(!listed_json.contains(&created.plaintext_token));
 
         let validation = service
@@ -1567,6 +1707,9 @@ mod tests {
             validation.credential_kind,
             AuthCredentialKindDto::AccessToken
         );
+        assert_eq!(validation.scopes, vec![AuthScope::SessionsRead]);
+        assert!(validation.has_scope(AuthScope::SessionsRead));
+        assert!(!validation.has_scope(AuthScope::TokensManage));
         assert!(
             service
                 .revoke_account_token(&user_id, &created.token.id)
@@ -1582,11 +1725,12 @@ mod tests {
     #[test]
     fn account_devices_list_and_revoke() {
         let dir = tempfile::tempdir().unwrap();
-        let service = app_service_with_db(settings_with_share_token(), dir.path().join("auth.db"));
+        let service = app_service_with_db(settings_with_share_config(), dir.path().join("auth.db"));
         let signup = signup_user(&service);
 
         let devices = service.account_devices(&signup.user.id).unwrap();
         assert_eq!(devices.devices.len(), 1);
+        assert_eq!(devices.devices[0].scopes, AuthScope::all());
         assert!(
             service
                 .revoke_account_device(&signup.user.id, &devices.devices[0].id)
@@ -1597,6 +1741,33 @@ mod tests {
             .auth_validate(&signup.session_token)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn share_links_use_per_link_tokens_and_can_be_revoked() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = app_service_with_db(settings_with_share_config(), dir.path().join("auth.db"));
+        let signup = signup_user(&service);
+
+        let link = service
+            .share_link_for_session(&signup.user.id, &session())
+            .unwrap();
+        let links = service.account_share_links(&signup.user.id).unwrap();
+
+        assert_eq!(links.links.len(), 1);
+        assert_eq!(links.links[0].id, link.id);
+        assert_eq!(links.links[0].session.id, "sid");
+        assert!(link.url.starts_with("http://share.example/#/share/"));
+        assert!(link.url.contains("?share_token=coca_share_"));
+        assert!(!link.url.contains("share-secret"));
+        assert!(link.expires_at_ms > now_ms() + SHARE_LINK_TTL_MS - 60_000);
+
+        let revoked = service
+            .revoke_account_share_link(&signup.user.id, &link.id)
+            .unwrap();
+        assert!(revoked.revoked);
+        let links = service.account_share_links(&signup.user.id).unwrap();
+        assert!(links.links[0].revoked_at_ms.is_some());
     }
 
     fn app_service(settings: Settings) -> AppService {
@@ -1621,10 +1792,10 @@ mod tests {
         })
     }
 
-    fn settings_with_share_token() -> Settings {
+    fn settings_with_share_config() -> Settings {
         let mut settings = Settings::default();
         settings.ensure_defaults();
-        settings.share.token = "share-secret".to_string();
+        settings.share.base_url = "http://share.example".to_string();
         settings
     }
 
@@ -1635,7 +1806,6 @@ mod tests {
                 password: "password".to_string(),
                 display_name: Some("User".to_string()),
                 device_label: Some("Browser".to_string()),
-                bootstrap_token: Some("share-secret".to_string()),
             })
             .unwrap()
     }
